@@ -1,24 +1,10 @@
-# DG-LLM: Dynamic Graph-aware Large Language Model for Traffic Prediction
+# DG-LLM: Decomposition-based Dynamic Graph Adaptation of Large Language Models for Spatiotemporal Traffic Forecasting
 
 A spatio-temporal traffic prediction model that combines **Variational Mode Decomposition (VMD)** with a **GPT-2 backbone** enhanced by **dynamic graph attention**.
 
-## Architecture Overview
+## Architecture
 
-```
-Input Data → VMD Decomposition → [Mode 1, Mode 2, Mode 3]
-                                         ↓
-                              Each mode processed by:
-                              ┌──────────────────────────────────┐
-                              │  SingleMode_Dynamic_STLLM        │
-                              │  ├─ Temporal Embeddings          │
-                              │  ├─ Multi-scale Conv             │
-                              │  ├─ Dynamic Graph Learning (GAT) │
-                              │  └─ GPT-2 with LoRA (PFA)        │
-                              └──────────────────────────────────┘
-                                         ↓
-                              Attention Fusion → Prediction
-```
-
+![DG-LLM Architecture](Images/architecture.png)
 ## Key Features
 
 - **VMD**: Per-sample decomposition (no data leakage between train/val/test)
@@ -37,7 +23,6 @@ pip install torch transformers peft vmdpy tqdm numpy
 ```
 DG-LLM/
 ├── DGLLM.ipynb          # Main training notebook
-├── Dataset/
 ├── log/
 │   └── best_model.pth   # Saved model checkpoint
 └── vmd_cache/           # Cached VMD decompositions
@@ -45,11 +30,7 @@ DG-LLM/
 
 ## Dataset Download
 
-The datasets are available on Google Drive:
-
-📥 **[Download Datasets](https://drive.google.com/file/d/19LkZXBCS7E2SCuM2ZQ7YKT7L0-wMXrJa/view?usp=sharing)**
-
-After downloading, extract the contents to the `Dataset/` folder.
+The datasets are available on Google Drive: **[Datasets](https://drive.google.com/file/d/19LkZXBCS7E2SCuM2ZQ7YKT7L0-wMXrJa/view?usp=sharing)**
 
 ## Dataset Format
 
@@ -59,7 +40,7 @@ Each dataset should contain:
   - `y`: Target values `[Samples, 12, Nodes, 1]`
 - `adj_mx.pkl`: Adjacency matrix `[Nodes, Nodes]`
 
-## Training
+## Run Model
 
 Open `DGLLM.ipynb` and run all cells. Key configurations:
 
@@ -84,3 +65,11 @@ args = Args(
 | `SingleMode_Dynamic_STLLM` | Single mode processor with dynamic graph |
 | `PFA` | GPT-2 with LoRA and graph attention |
 | `TemporalEmbedding` | Learnable time-of-day/day-of-week embeddings |
+
+## Acknowledgements
+
+This project is built upon the work of [ST-LLM](https://github.com/ChenxiLiu-HNU/ST-LLM). We thank the authors for providing the base code and datasets.
+
+## Citation
+
+Paper is currently under review. Citation information will be updated upon publication.
