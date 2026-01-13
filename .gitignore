@@ -1,0 +1,5 @@
+log
+vmd_cache
+Demo
+.venv/
+__pycache__
