@@ -3,3 +3,5 @@ vmd_cache
 Demo
 .venv/
 __pycache__
+Dataset
+test_logs

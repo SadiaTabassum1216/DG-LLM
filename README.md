@@ -14,21 +14,18 @@ Traffic forecasting is a crucial part of urban planning, and it is critical to u
 - **GPT-2 Backbone**: Pre-trained LLM adapted for time series with LoRA fine-tuning
 - **Gradient Checkpointing**: Memory-efficient training for large models
 
-## Installation
 
-```bash
-pip install torch transformers peft vmdpy tqdm numpy
-```
+## How to Run
 
-## Project Structure
-
-```
-DG-LLM/
-├── DGLLM.ipynb          # Main training notebook
-├── log/
-│   └── best_model.pth   # Saved model checkpoint
-└── vmd_cache/           # Cached VMD decompositions
-```
+1.  **Install Dependencies**:
+    ```bash
+    pip install -r requirements.txt
+    ```
+2.  **Prepare Data**: Place your `.npz` files in `./Dataset/<dataset_name>/` (e.g., `./Dataset/PEMSD04/`).
+3.  **Execute**:
+    ```bash
+    python main.py
+    ```
 
 ## Dataset Download
 

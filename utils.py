@@ -1,0 +1,147 @@
+import torch
+import numpy as np
+import pickle
+import math
+from torch.optim.optimizer import Optimizer
+
+def load_pickle(pickle_file):
+    """Load a pickle file with fallback for different encodings."""
+    try:
+        with open(pickle_file, 'rb') as f:
+            pickle_data = pickle.load(f)
+    except UnicodeDecodeError as e:
+        with open(pickle_file, 'rb') as f:
+            pickle_data = pickle.load(f, encoding='latin1')
+    except Exception as e:
+        print('Unable to load data ', pickle_file, ':', e)
+        raise
+    return pickle_data
+
+class StandardScaler:
+    """Standard scaler for normalizing/denormalizing data."""
+    def __init__(self, mean, std):
+        self.mean = mean
+        self.std = std
+    def transform(self, data):
+        return (data - self.mean) / (self.std + 1e-8)
+    def inverse_transform(self, data):
+        return (data * self.std) + self.mean
+
+# Metrics
+def MAE_torch(pred, true, mask_value=None):
+    if mask_value is not None:
+        mask = torch.gt(true, mask_value)
+        pred = torch.masked_select(pred, mask)
+        true = torch.masked_select(true, mask)
+    return torch.mean(torch.abs(true - pred))
+
+def MAPE_torch(pred, true, mask_value=None):
+    if mask_value is not None:
+        mask = torch.gt(true, mask_value)
+        pred = torch.masked_select(pred, mask)
+        true = torch.masked_select(true, mask)
+    return torch.mean(torch.abs(torch.div((true - pred), true)))
+
+def RMSE_torch(pred, true, mask_value=None):
+    if mask_value is not None:
+        mask = torch.gt(true, mask_value)
+        pred = torch.masked_select(pred, mask)
+        true = torch.masked_select(true, mask)
+    return torch.sqrt(torch.mean((pred - true) ** 2))
+
+def WMAPE_torch(pred, true, mask_value=None):
+    if mask_value is not None:
+        mask = torch.gt(true, mask_value)
+        pred = torch.masked_select(pred, mask)
+        true = torch.masked_select(true, mask)
+    loss = torch.sum(torch.abs(pred - true)) / torch.sum(torch.abs(true))
+    return loss
+
+def metric(pred, real):
+    """Calculate aggregate metrics: MAE, MAPE, RMSE, WMAPE."""
+    mae = MAE_torch(pred, real, 0).item()
+    mape = MAPE_torch(pred, real, 0).item()
+    wmape = WMAPE_torch(pred, real, 0).item()
+    rmse = RMSE_torch(pred, real, 0).item()
+    return mae, mape, rmse, wmape
+
+def metric_per_horizon(pred, real):
+    """Calculate MAE, MAPE, RMSE metrics for each prediction horizon."""
+    # pred/real shape: [Batch, Horizon, Nodes, 1]
+    mae_list, mape_list, rmse_list = [], [], []
+    for t in range(real.shape[1]):
+        p = pred[:, t, ...]
+        r = real[:, t, ...]
+        mae_list.append(MAE_torch(p, r, 0).item())
+        mape_list.append(MAPE_torch(p, r, 0).item())
+        rmse_list.append(RMSE_torch(p, r, 0).item())
+    return mae_list, mape_list, rmse_list
+
+class Ranger(Optimizer):
+    """Ranger optimizer (RAdam + LookAhead + Gradient Centralization)."""
+    def __init__(self, params, lr=1e-3, alpha=0.5, k=6, N_sma_threshhold=5, betas=(0.95, 0.999), eps=1e-5, weight_decay=0, use_gc=True, gc_conv_only=False):
+        if not 0.0 <= alpha <= 1.0: raise ValueError(f"Invalid slow update rate: {alpha}")
+        defaults = dict(lr=lr, alpha=alpha, k=k, step_counter=0, betas=betas, N_sma_threshhold=N_sma_threshhold, eps=eps, weight_decay=weight_decay)
+        super().__init__(params, defaults)
+        self.N_sma_threshhold = N_sma_threshhold
+        self.alpha = alpha
+        self.k = k
+        self.radam_buffer = [[None, None, None] for _ in range(10)]
+        self.use_gc = use_gc
+        self.gc_gradient_threshold = 3 if gc_conv_only else 1
+
+    def step(self, closure=None):
+        loss = None
+        for group in self.param_groups:
+            for p in group["params"]:
+                if p.grad is None: continue
+                grad = p.grad.data.float()
+                if grad.is_sparse: raise RuntimeError("Ranger optimizer does not support sparse gradients")
+                p_data_fp32 = p.data.float()
+                state = self.state[p]
+                if len(state) == 0:
+                    state["step"] = 0
+                    state["exp_avg"] = torch.zeros_like(p_data_fp32)
+                    state["exp_avg_sq"] = torch.zeros_like(p_data_fp32)
+                    state["slow_buffer"] = torch.empty_like(p.data)
+                    state["slow_buffer"].copy_(p.data)
+                else:
+                    state["exp_avg"] = state["exp_avg"].type_as(p_data_fp32)
+                    state["exp_avg_sq"] = state["exp_avg_sq"].type_as(p_data_fp32)
+
+                exp_avg, exp_avg_sq = state["exp_avg"], state["exp_avg_sq"]
+                beta1, beta2 = group["betas"]
+                if grad.dim() > self.gc_gradient_threshold:
+                    grad.add_(-grad.mean(dim=tuple(range(1, grad.dim())), keepdim=True))
+                state["step"] += 1
+                exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
+                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+                
+                buffered = self.radam_buffer[int(state["step"] % 10)]
+                if state["step"] == buffered[0]:
+                    N_sma, step_size = buffered[1], buffered[2]
+                else:
+                    buffered[0] = state["step"]
+                    beta2_t = beta2 ** state["step"]
+                    N_sma_max = 2 / (1 - beta2) - 1
+                    N_sma = N_sma_max - 2 * state["step"] * beta2_t / (1 - beta2_t)
+                    buffered[1] = N_sma
+                    if N_sma > self.N_sma_threshhold:
+                        step_size = math.sqrt((1 - beta2_t) * (N_sma - 4) / (N_sma_max - 4) * (N_sma - 2) / N_sma * N_sma_max / (N_sma_max - 2)) / (1 - beta1 ** state["step"])
+                    else:
+                        step_size = 1.0 / (1 - beta1 ** state["step"])
+                    buffered[2] = step_size
+
+                if group["weight_decay"] != 0:
+                    p_data_fp32.add_(p_data_fp32, alpha=-group["weight_decay"] * group["lr"])
+                if N_sma > self.N_sma_threshhold:
+                    denom = exp_avg_sq.sqrt().add_(group["eps"])
+                    p_data_fp32.addcdiv_(exp_avg, denom, value=-step_size * group["lr"])
+                else:
+                    p_data_fp32.add_(exp_avg, alpha=-step_size * group["lr"])
+                p.data.copy_(p_data_fp32)
+                if state["step"] % group["k"] == 0:
+                    slow_p = state["slow_buffer"]
+                    slow_p.add_(p.data - slow_p, alpha=self.alpha)
+                    p.data.copy_(slow_p)
+        return loss
