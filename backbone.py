@@ -3,24 +3,32 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional, Tuple, Union
 from transformers.models.gpt2.modeling_gpt2 import GPT2Attention, GPT2Block, GPT2Model
-from peft import get_peft_model, LoraConfig, TaskType
+from transformers.modeling_outputs import BaseModelOutputWithPastAndCrossAttentions
+from peft import get_peft_model, LoraConfig
+from torch.utils.checkpoint import checkpoint
 
+# ============================================================================
+# 1. CUSTOM GPT-2 ATTENTION WITH PAIRWISE BIAS
+# ============================================================================
 class CustomGPT2Attention(GPT2Attention):
     """
-    Modified GPT-2 Attention to support pairwise adjacency bias.
+    Extends HF GPT2Attention to accept attn_bias: [B, H, Tq, Tk] (additive; 0 allow, -inf block).
+    Keeps standard causal masking; final mask = causal + attn_bias.
+    Uses torch.nn.functional.scaled_dot_product_attention.
     """
+
     def forward(
         self,
         hidden_states: torch.Tensor,
         layer_past: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-        attention_mask: Optional[torch.Tensor] = None,      
+        attention_mask: Optional[torch.Tensor] = None,
         head_mask: Optional[torch.Tensor] = None,
         encoder_hidden_states: Optional[torch.Tensor] = None,
         encoder_attention_mask: Optional[torch.Tensor] = None,
         use_cache: bool = False,
         output_attentions: bool = False,
-        attn_bias: Optional[torch.Tensor] = None,           # NEW: [B, H, Tq, Tk] with 0/-inf
-        **kwargs,                                           # Robustness
+        attn_bias: Optional[torch.Tensor] = None,
+        **kwargs,
     ):
         # Handle both layer_past and past_key_value
         if layer_past is None and 'past_key_value' in kwargs:
@@ -40,20 +48,20 @@ class CustomGPT2Attention(GPT2Attention):
             return x.view(*new_x_shape)
 
         query = shape(query)
-        key   = shape(key)
+        key = shape(key)
         value = shape(value)
 
-        if layer_past is not None and len(layer_past) == 2:
+        if layer_past is not None:
             past_key, past_value = layer_past
-            key   = torch.cat([past_key, key], dim=-2)
+            key = torch.cat([past_key, key], dim=-2)
             value = torch.cat([past_value, value], dim=-2)
         present = (key, value) if use_cache else None
 
         Tq = query.size(-2)
         Tk = key.size(-2)
-        H  = query.size(1)
+        H = query.size(1)
 
-        # Build causal mask
+        # Build causal mask (additive; -inf on future)
         causal_disallow = torch.triu(
             torch.ones(Tq, Tk, device=hidden_states.device, dtype=torch.bool),
             diagonal=1
@@ -62,6 +70,7 @@ class CustomGPT2Attention(GPT2Attention):
         causal_add = causal_add.masked_fill(causal_disallow, float("-inf"))
         causal_add = causal_add.view(1, 1, Tq, Tk).expand(bsz, H, Tq, Tk)
 
+        # Combine with user-provided attn_bias if present
         if attn_bias is not None:
             if attn_bias.dim() != 4 or attn_bias.size(2) != Tq or attn_bias.size(3) != Tk:
                 raise ValueError(f"attn_bias must be [B|1, H|1, Tq, Tk]; got {tuple(attn_bias.size())}")
@@ -73,6 +82,7 @@ class CustomGPT2Attention(GPT2Attention):
         else:
             additive_mask = causal_add
 
+        # SDPA
         attn_output = F.scaled_dot_product_attention(
             query, key, value,
             attn_mask=additive_mask,
@@ -86,26 +96,32 @@ class CustomGPT2Attention(GPT2Attention):
 
         outputs = (attn_output, present)
         if output_attentions:
-            outputs += (None,) 
+            outputs += (None,)
         return outputs
 
+
+# ============================================================================
+# 2. CUSTOM GPT-2 BLOCK
+# ============================================================================
 class CustomGPT2Block(GPT2Block):
-    """Modified GPT-2 Block to pass attn_bias to attention layer."""
+    """Same as GPT2Block, but passes attn_bias through to attention."""
+
     def forward(
         self,
-        hidden_states: Optional[torch.Tensor],
-        layer_past: Optional[Tuple[torch.Tensor]] = None,
+        hidden_states: torch.FloatTensor,
+        layer_past: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         attention_mask: Optional[torch.Tensor] = None,
         head_mask: Optional[torch.Tensor] = None,
         encoder_hidden_states: Optional[torch.Tensor] = None,
         encoder_attention_mask: Optional[torch.Tensor] = None,
-        use_cache: Optional[bool] = False,
-        output_attentions: Optional[bool] = False,
-        attn_bias: Optional[torch.Tensor] = None, # NEW
-        **kwargs, # Robustness
-    ) -> Union[Tuple[torch.Tensor], Optional[Tuple[torch.Tensor, Tuple[torch.Tensor, ...]]]]:
+        use_cache: bool = False,
+        output_attentions: bool = False,
+        attn_bias: Optional[torch.Tensor] = None,
+        **kwargs,
+    ):
         residual = hidden_states
         hidden_states = self.ln_1(hidden_states)
+
         attn_outputs = self.attn(
             hidden_states,
             layer_past=layer_past,
@@ -113,12 +129,13 @@ class CustomGPT2Block(GPT2Block):
             head_mask=head_mask,
             use_cache=use_cache,
             output_attentions=output_attentions,
-            attn_bias=attn_bias, # PASS BIAS
-            **kwargs, # PASS EXTRA
+            attn_bias=attn_bias,
+            **kwargs,
         )
-        attn_output = attn_outputs[0]  
+        attn_output = attn_outputs[0]
         outputs = attn_outputs[1:]
-        hidden_states = attn_output + residual
+
+        hidden_states = residual + attn_output
 
         residual = hidden_states
         hidden_states = self.ln_2(hidden_states)
@@ -129,82 +146,93 @@ class CustomGPT2Block(GPT2Block):
             outputs = (hidden_states,) + outputs
         else:
             outputs = (hidden_states,) + outputs[1:]
+        return outputs
 
-        return outputs  
 
-def patch_gpt2_for_pairwise_mask(model: GPT2Model):
-    """Replaces standard GPT2Attention components with CustomGPT2Attention."""
-    for i, block in enumerate(model.h):
-        old_attn = block.attn
-        new_attn = CustomGPT2Attention(model.config, is_cross_attention=False, layer_idx=i)
-        
-        new_attn.c_attn = old_attn.c_attn
-        new_attn.c_proj = old_attn.c_proj
-        new_attn.attn_dropout = old_attn.attn_dropout
-        new_attn.resid_dropout = old_attn.resid_dropout
-        
-        block.attn = new_attn
-        
-        # Upgrade block to CustomGPT2Block
-        new_block = CustomGPT2Block(model.config, layer_idx=i)
-        new_block.ln_1 = block.ln_1
-        new_block.attn = block.attn
-        new_block.ln_2 = block.ln_2
-        new_block.mlp  = block.mlp
-        model.h[i] = new_block
-    return model
-
-def adjacency_to_pairwise_bias(adj: torch.Tensor):
+# ============================================================================
+# 3. PATCHING FUNCTION
+# ============================================================================
+def patch_gpt2_for_pairwise_mask(gpt2_model):
     """
-    Converts [B, N, N] adjacency matrix into [B, 1, N, N] attention bias.
-    1.0 (connected) -> 0.0 (no mask)
-    0.0 (disconnected) -> -inf (masked)
+    Safely patch in-place without calling __init__ on GPT-2 internals.
+    We keep the same block/attn instances and just swap their classes.
     """
-    bias = torch.zeros_like(adj)
-    bias = bias.masked_fill(adj == 0, float("-inf"))
-    return bias.unsqueeze(1) 
+    for i, blk in enumerate(gpt2_model.h):
+        blk.attn.__class__ = CustomGPT2Attention
+        blk.__class__ = CustomGPT2Block
 
+
+# ============================================================================
+# 4. ADJACENCY TO PAIRWISE BIAS
+# ============================================================================
+def adjacency_to_pairwise_bias(adj, B, H, device, dtype):
+    """
+    adj: [T, T] with 1 (allow) / 0 (block)
+    returns additive bias [B, H, T, T] with 0 for allowed, -inf for blocked.
+    """
+    assert adj.dim() == 2 and adj.size(0) == adj.size(1), "adj must be [T,T]"
+    T = adj.size(0)
+    add = torch.zeros((T, T), device=device, dtype=dtype)
+    add = add.masked_fill(~adj.to(torch.bool), float("-inf"))
+    add = add.view(1, 1, T, T).expand(B, H, T, T)
+    return add
+
+
+# ============================================================================
+# 5. PFA - PRE-TRAINED FOUNDATION ADAPTER (EXACT NOTEBOOK VERSION)
+# ============================================================================
 class PFA(nn.Module):
     """
-    Pre-trained Foundation Adapter.
-    Wraps GPT-2 with LoRA and custom graph attention patching.
+    Pre-trained Foundation Adapter: GPT-2 backbone with LoRA fine-tuning
+    and graph-aware attention via pairwise adjacency bias.
     """
-    def __init__(self, d_model, patch_size, args):
+    def __init__(
+        self, 
+        device: str = "cuda:0", 
+        gpt_layers: int = 6, 
+        U: int = 1, 
+        dropout_rate: float = 0.0,
+        use_gradient_checkpointing: bool = True
+    ):
         super(PFA, self).__init__()
-        self.d_model = d_model
-        
-        # 1. Load Pre-trained GPT-2
-        from transformers import AutoConfig
-        config = AutoConfig.from_pretrained('gpt2')
-        config.n_embd = d_model
-        config.n_inner = 4 * d_model
-        config.n_head = 8
-        self.backbone = GPT2Model(config)
-        
-        # Truncate layers to match args
-        self.backbone.h = self.backbone.h[:args.llm_layers]
-        
-        # 2. Patch for Graph Awareness
-        self.backbone = patch_gpt2_for_pairwise_mask(self.backbone)
 
-        # 3. Apply LoRA
-        lora_config = LoraConfig(
-            r=args.lora_r,
+        # Load GPT-2 with pretrained weights
+        self.gpt2 = GPT2Model.from_pretrained(
+            "gpt2",
+            attn_implementation="eager",
+            output_attentions=True,
+            output_hidden_states=True
+        )
+
+        # Truncate to first gpt_layers
+        self.gpt2.h = self.gpt2.h[:gpt_layers]
+
+        self.U = U
+        self.device = device
+        self.dropout_rate = dropout_rate
+        self.dropout = nn.Dropout(p=self.dropout_rate)
+        self.lora_rank = 16
+        self.use_gradient_checkpointing = use_gradient_checkpointing
+
+        # Patch BEFORE applying LoRA
+        patch_gpt2_for_pairwise_mask(self.gpt2)
+
+        # LoRA
+        self.lora_config = LoraConfig(
+            r=self.lora_rank,
             lora_alpha=32,
-            target_modules=["c_attn"],
-            lora_dropout=0.05,
+            lora_dropout=self.dropout_rate,
+            target_modules=['c_attn'],
             bias="none"
         )
-        self.backbone = get_peft_model(self.backbone, lora_config)
+        self.gpt2 = get_peft_model(self.gpt2, self.lora_config)
 
-        # 4. Freezing Policy (from notebook)
-        # U is number of layers from top to keep trainable
-        gpt_layers = args.llm_layers
-        U = args.U
-        for layer_index, layer in enumerate(self.backbone.base_model.model.h):
+        # Freezing policy
+        gpt_layers_count = len(self.gpt2.base_model.model.h)
+        for layer_index, layer in enumerate(self.gpt2.base_model.model.h):
             for name, param in layer.named_parameters():
-                if layer_index < gpt_layers - U:
-                    if "ln" in name:
+                if layer_index < gpt_layers_count - self.U:
+                    if "ln" in name or "wpe" in name:
                         param.requires_grad = True
                     else:
                         param.requires_grad = False
@@ -214,48 +242,147 @@ class PFA(nn.Module):
                     else:
                         param.requires_grad = True
 
-        # 5. Gradient Checkpointing
-        if args.use_checkpoint:
-            self.backbone.gradient_checkpointing_enable()
-
     def custom_forward(
         self,
+        input_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[Tuple[Tuple[torch.Tensor]]] = None,
+        attention_mask: Optional[torch.FloatTensor] = None,
+        token_type_ids: Optional[torch.LongTensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        head_mask: Optional[torch.FloatTensor] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
+        encoder_hidden_states: Optional[torch.Tensor] = None,
+        encoder_attention_mask: Optional[torch.FloatTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
         adjacency_matrix: Optional[torch.FloatTensor] = None,
-        **kwargs
-    ):
-        model = self.backbone.base_model.model
-        device = inputs_embeds.device
+    ) -> Union[Tuple, dict]:
         
-        # We assume sequence length T matches adjacency matrix size
-        T = inputs_embeds.size(1)
-        H = model.config.n_head
-        B = inputs_embeds.size(0)
+        gpt2_model = self.gpt2.base_model.model
         
+        output_attentions = output_attentions if output_attentions is not None else gpt2_model.config.output_attentions
+        output_hidden_states = output_hidden_states if output_hidden_states is not None else gpt2_model.config.output_hidden_states
+        use_cache = use_cache if use_cache is not None else gpt2_model.config.use_cache
+        return_dict = return_dict if return_dict is not None else gpt2_model.config.use_return_dict
+
+        if input_ids is not None and inputs_embeds is not None:
+            raise ValueError("Specify either input_ids or inputs_embeds, not both.")
+        elif input_ids is not None:
+            input_shape = input_ids.size()
+            batch_size = input_ids.shape[0]
+        elif inputs_embeds is not None:
+            input_shape = inputs_embeds.size()[:-1]
+            batch_size = inputs_embeds.shape[0]
+        else:
+            raise ValueError("You must specify input_ids or inputs_embeds.")
+
+        device = input_ids.device if input_ids is not None else inputs_embeds.device
+
+        if past_key_values is None:
+            past_length = 0
+            past_key_values = tuple([None] * len(gpt2_model.h))
+        else:
+            past_length = past_key_values[0][0].size(-2)
+
+        if position_ids is None:
+            position_ids = torch.arange(
+                past_length, input_shape[-1] + past_length, dtype=torch.long, device=device
+            ).unsqueeze(0)
+
+        if inputs_embeds is None:
+            inputs_embeds = gpt2_model.wte(input_ids)
+        position_embeds = gpt2_model.wpe(position_ids)
+        hidden_states = inputs_embeds + position_embeds
+
+        all_self_attentions = () if output_attentions else None
+        all_hidden_states = () if output_hidden_states else None
+        presents = () if use_cache else None
+
+        total_layers = len(gpt2_model.h)
+        top_start = total_layers - self.U
+
+        # Precompute pairwise bias if adjacency provided
         pair_bias = None
         if adjacency_matrix is not None:
-             pair_bias = adjacency_to_pairwise_bias(adjacency_matrix).expand(B, H, T, T)
-        
-        # Manual Forward Through Blocks
-        # (Simplified version of notebook's custom_forward)
-        hidden_states = inputs_embeds # We skip WPE for temporal since we use TemporalEmbedding
-        
-        for block in model.h:
-            outputs = block(
-                hidden_states,
-                attn_bias=pair_bias
+            H = gpt2_model.config.n_head
+            T = hidden_states.size(1)
+            if adjacency_matrix.dim() != 2 or adjacency_matrix.size(0) != T or adjacency_matrix.size(1) != T:
+                raise ValueError(f"adjacency_matrix must be [T,T] matching sequence length {T}")
+            pair_bias = adjacency_to_pairwise_bias(
+                adj=adjacency_matrix.to(device),
+                B=batch_size,
+                H=H,
+                device=device,
+                dtype=hidden_states.dtype
             )
-            hidden_states = outputs[0]
-            
-        return hidden_states
 
-    def forward(self, x, adjacency_matrix=None):
-        # x: [B, T, D]
-        # adjacency_matrix: [B, N, N]
-        
-        # Use custom manual loop to ensure attn_bias is used
+        # Main layer loop
+        for i, (block, layer_past) in enumerate(zip(gpt2_model.h, past_key_values)):
+            use_bias = (i >= top_start and pair_bias is not None)
+            
+            if self.training and self.use_gradient_checkpointing and not use_cache:
+                def create_custom_forward(module, current_bias):
+                    def custom_forward(hidden_states_input):
+                        outputs = module(
+                            hidden_states_input,
+                            layer_past=None,
+                            attention_mask=None,
+                            head_mask=head_mask[i] if head_mask is not None else None,
+                            use_cache=False,
+                            output_attentions=False,
+                            attn_bias=current_bias
+                        )
+                        return outputs[0]
+                    return custom_forward
+                
+                hidden_states = checkpoint(
+                    create_custom_forward(block, pair_bias if use_bias else None),
+                    hidden_states,
+                    use_reentrant=False
+                )
+            else:
+                outputs = block(
+                    hidden_states,
+                    layer_past=layer_past,
+                    attention_mask=None,
+                    head_mask=head_mask[i] if head_mask is not None else None,
+                    use_cache=use_cache,
+                    output_attentions=output_attentions,
+                    attn_bias=pair_bias if use_bias else None
+                )
+                hidden_states = outputs[0]
+
+                if use_cache:
+                    presents = presents + (outputs[1],)
+                if output_attentions:
+                    all_self_attentions = all_self_attentions + (outputs[2] if len(outputs) > 2 else None,)
+
+        hidden_states = gpt2_model.ln_f(hidden_states)
+        hidden_states = hidden_states.view((-1,) + input_shape[1:] + (hidden_states.size(-1),))
+
+        if not return_dict:
+            return tuple(
+                v for v in [hidden_states, presents, all_hidden_states, all_self_attentions] if v is not None
+            )
+
+        return BaseModelOutputWithPastAndCrossAttentions(
+            last_hidden_state=hidden_states,
+            past_key_values=presents,
+            hidden_states=all_hidden_states,
+            attentions=all_self_attentions
+        )
+
+    def forward(self, x: torch.Tensor, adjacency_matrix: torch.Tensor):
+        """
+        x: [B, T, D] - Input embeddings
+        adjacency_matrix: [T, T] with 1 (allow) / 0 (block)
+        """
         out = self.custom_forward(
             inputs_embeds=x,
-            adjacency_matrix=adjacency_matrix
-        )
+            adjacency_matrix=adjacency_matrix,
+            use_cache=False
+        ).last_hidden_state
+        out = self.dropout(out)
         return out

@@ -48,9 +48,15 @@ def visualize_weekly_horizon1(preds, reals, node_idx=0):
 
 def verify_temporal_features(data_loader):
     """Sanity check for TOD and DOW features."""
-    x, y, vmd = next(iter(data_loader))
-    tod = x[0, :, 0, 1].cpu().numpy() # [T]
-    dow = x[0, :, 0, 2].cpu().numpy() # [T]
+    x, y, vmd = next(data_loader.get_iterator())
+    
+    # Handle both numpy and torch
+    if hasattr(x, 'cpu'):
+        tod = x[0, :, 0, 1].cpu().numpy()
+        dow = x[0, :, 0, 2].cpu().numpy()
+    else:
+        tod = x[0, :, 0, 1]
+        dow = x[0, :, 0, 2]
     
     plt.figure(figsize=(12, 4))
     plt.subplot(1, 2, 1)

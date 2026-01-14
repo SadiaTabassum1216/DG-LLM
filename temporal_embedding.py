@@ -1,25 +1,37 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+import math
 
 class TemporalEmbedding(nn.Module):
     """
-    Standard temporal embedding for traffic forecasting.
-    Expects TOD (Time-of-Day) and DOW (Day-of-Week) as input.
+    Learnable temporal embeddings for time-of-day and day-of-week.
+    
+    Args:
+        time: Number of time slots per day (288 for 5-min, 48 for 30-min)
+        features: Embedding dimension
     """
-    def __init__(self, d_model, embed_type='fixed', freq='h'):
-        super(TemporalEmbedding, self).__init__()
-
-        # TOD (288 steps/day)
-        self.tod_embed = nn.Embedding(288, d_model)
-        # DOW (7 days/week)
-        self.dow_embed = nn.Embedding( 7, d_model)
+    def __init__(self, time, features):
+        super().__init__()
+        self.time = time
+        self.time_day = nn.Parameter(torch.empty(time, features))
+        self.time_week = nn.Parameter(torch.empty(7, features))
+        nn.init.xavier_uniform_(self.time_day)
+        nn.init.xavier_uniform_(self.time_week)
 
     def forward(self, x):
-        # x is assumed to be [B, T, N, 2] 
-        # where x[..., 0] is TOD (normalized 0-1) and x[..., 1] is DOW (0-6)
+        B, T, N, _ = x.shape
         
-        # Denormalize TOD: 0-1 -> 0-287
-        tod = (x[..., 0] * 288).long()
-        dow = x[..., 1].long()
-
-        return self.tod_embed(tod) + self.dow_embed(dow)
+        # Use LAST timestep's temporal features (correct for prediction)
+        day_emb = x[:, -1, :, 1]   # [B, N]
+        week_emb = x[:, -1, :, 2]  # [B, N]
+        
+        # Index with clamping
+        day_idx = (day_emb * self.time).long().clamp(0, self.time - 1)
+        week_idx = week_emb.long().clamp(0, 6)
+        
+        time_day_emb = self.time_day[day_idx]    # [B, N, D]
+        time_week_emb = self.time_week[week_idx] # [B, N, D]
+        
+        combined = time_day_emb + time_week_emb
+        return combined.transpose(1, 2).unsqueeze(-1)  # [B, D, N, 1]

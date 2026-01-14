@@ -31,6 +31,21 @@ class OptimizedDataLoader:
     def __len__(self):
         return (self.num_samples + self.batch_size - 1) // self.batch_size
 
+    def get_iterator(self):
+        """Returns an iterator that yields numpy arrays (for notebook compatibility)."""
+        indices = np.arange(self.num_samples)
+        if self.shuffle:
+            np.random.shuffle(indices)
+        
+        for i in range(0, self.num_samples, self.batch_size):
+            batch_indices = indices[i : i + self.batch_size]
+            
+            x = self.data_x[batch_indices]
+            y = self.data_y[batch_indices]
+            vmd = self.vmd_data[batch_indices]
+            
+            yield x, y, vmd
+
 def load_dataset_optimized(dataset_dir, batch_size, args, force_recompute=False):
     """
     Load and preprocess traffic dataset with VMD decomposition.

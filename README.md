@@ -7,6 +7,7 @@ Traffic forecasting is a crucial part of urban planning, and it is critical to u
 ## Architecture
 
 ![DG-LLM Architecture](Images/architecture.png)
+
 ## Key Features
 
 - **VMD**: Per-sample decomposition (no data leakage between train/val/test)
@@ -14,18 +15,24 @@ Traffic forecasting is a crucial part of urban planning, and it is critical to u
 - **GPT-2 Backbone**: Pre-trained LLM adapted for time series with LoRA fine-tuning
 - **Gradient Checkpointing**: Memory-efficient training for large models
 
-
 ## How to Run
 
-1.  **Install Dependencies**:
-    ```bash
-    pip install -r requirements.txt
-    ```
-2.  **Prepare Data**: Place your `.npz` files in `./Dataset/<dataset_name>/` (e.g., `./Dataset/PEMSD04/`).
-3.  **Execute**:
-    ```bash
-    python main.py
-    ```
+1. **Install Dependencies**:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+2. **Prepare Data**: 
+   - Download datasets from the link below
+   - Extract to `./Dataset/<dataset_name>/`
+   - Each dataset folder should contain:
+     - `adj_mx.pkl` - Adjacency matrix
+     - `processed/` folder with `train.npz`, `val.npz`, `test.npz`
+
+3. **Run Training**:
+   ```bash
+   python main.py
+   ```
 
 ## Dataset Download
 
@@ -33,37 +40,58 @@ The datasets are available on Google Drive: **[Datasets](https://drive.google.co
 
 ## Dataset Format
 
-Each dataset should contain:
-- `train.npz`, `val.npz`, `test.npz` with keys `x` and `y`
-  - `x`: Input features `[Samples, 12, Nodes, Features]`
-  - `y`: Target values `[Samples, 12, Nodes, 1]`
-- `adj_mx.pkl`: Adjacency matrix `[Nodes, Nodes]`
-
-## Run Model
-
-Open `DGLLM.ipynb` and run all cells. Key configurations:
-
-```python
-args = Args(
-    data="taxi_pick",        # Dataset name
-    num_nodes=266,           # Number of nodes
-    input_len=12,            # Input sequence length
-    output_len=12,           # Prediction horizon
-    batch_size=32,
-    epochs=100,
-    lrate=1e-3,
-)
+```
+Dataset/
+├── PEMSD04/
+│   ├── adj_mx.pkl          # Adjacency matrix [307, 307]
+│   └── processed/
+│       ├── train.npz       # x: [Samples, 12, 307, F], y: [Samples, 12, 307, 1]
+│       ├── val.npz
+│       └── test.npz
+├── PEMSD08/                # 170 nodes
+├── bike_drop/              # 250 nodes
+├── bike_pick/              # 250 nodes
+├── taxi_drop/              # 266 nodes
+└── taxi_pick/              # 266 nodes
 ```
 
+## Configuration
+
+Edit `main.py` to change settings:
+
+```python
+class Args:
+    def __init__(self):
+        self.data = 'PEMSD04'    # Dataset: 'PEMSD04', 'PEMSD08', 'bike_drop', 'taxi_pick', etc.
+        self.batch_size = 32
+        self.epochs = 50
+        self.lrate = 1e-3        # Learning rate
+        self.llm_layer = 6       # GPT-2 layers to use
+        self.U = 1               # Top layers to keep trainable
+```
 
 ## Model Components
 
 | Component | Description |
 |-----------|-------------|
-| `GATLLM` | Main model combining K VMD mode branches |
-| `SingleMode_Dynamic_STLLM` | Single mode processor with dynamic graph |
+| `DGLLM` | Main model combining K VMD mode branches |
+| `ModeProcessor` | Single mode processor with dynamic graph |
 | `PFA` | GPT-2 with LoRA and graph attention |
 | `TemporalEmbedding` | Learnable time-of-day/day-of-week embeddings |
+
+## Project Structure
+
+```
+DG-LLM/
+├── main.py              # Entry point and configuration
+├── model.py             # DGLLM and ModeProcessor
+├── backbone.py          # PFA (GPT-2 with LoRA)
+├── trainer.py           # Training and evaluation
+├── data_loader.py       # Dataset loading
+├── vmd_utils.py         # VMD decomposition
+├── utils.py             # Metrics and utilities
+└── visualization.py     # Plotting functions
+```
 
 ## Acknowledgements
 

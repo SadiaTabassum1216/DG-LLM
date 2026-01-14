@@ -1,111 +1,149 @@
 import torch
 import torch.nn as nn
+import numpy as np
 import os
-import time
-from utils import Ranger, metric, metric_per_horizon
+from tqdm import tqdm
+from utils import Ranger, MAE_torch, MAPE_torch, RMSE_torch, metric
 
-class DGLLM_Trainer:
-    """Trainer class for managing the DG-LLM training process."""
-    def __init__(self, model, scaler, args, device):
-        self.model = model.to(device)
-        self.scaler = scaler
+
+class VMD_Trainer:
+    def __init__(self, args, scaler, adj_mx, device):
         self.args = args
         self.device = device
+        self.scaler = scaler
         
-        self.optimizer = Ranger(self.model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-        self.loss_fn = nn.L1Loss() # MAE Loss
+        from model import DGLLM
+        self.model = DGLLM(
+            device, adj_mx, args.input_dim, args.num_nodes, 
+            args.input_len, args.output_len, args.llm_layer, args.U,
+            vmd_K=3
+        ).to(device)
+        
+        self.optimizer = Ranger(self.model.parameters(), lr=args.lrate, weight_decay=args.wdecay)
+        self.loss_fn = MAE_torch
         
         self.log_dir = args.log_dir
         os.makedirs(self.log_dir, exist_ok=True)
         self.best_val_loss = float('inf')
 
-    def train_epoch(self, loader):
-        self.model.train()
-        total_loss = 0
-        for x, y, vmd in loader:
-            x, y, vmd = x.to(self.device), y.to(self.device), vmd.to(self.device)
-            
-            self.optimizer.zero_grad()
-            pred = self.model(x, vmd)
-            
-            # Inverse scale for metric but use scaled for loss?
-            # Notebook uses scaled loss for stability
-            loss = self.loss_fn(pred, y)
-            loss.backward()
-            
-            # Gradient clipping
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-            self.optimizer.step()
-            
-            total_loss += loss.item()
-            
-        return total_loss / len(loader)
-
-    @torch.no_grad()
-    def eval_epoch(self, loader):
-        self.model.eval()
-        total_loss = 0
-        preds, reals = [], []
-        
-        for x, y, vmd in loader:
-            x, y, vmd = x.to(self.device), y.to(self.device), vmd.to(self.device)
-            pred = self.model(x, vmd)
-            
-            loss = self.loss_fn(pred, y)
-            total_loss += loss.item()
-            
-            # Denormalize for real-world metrics
-            preds.append(self.scaler.inverse_transform(pred))
-            reals.append(self.scaler.inverse_transform(y))
-            
-        avg_loss = total_loss / len(loader)
-        
-        preds = torch.cat(preds, dim=0)
-        reals = torch.cat(reals, dim=0)
-        
-        mae, mape, rmse, wmape = metric(preds, reals)
-        return avg_loss, mae, mape, rmse, wmape
-
-    def save_checkpoint(self, epoch, val_loss):
+    def save_checkpoint(self, epoch, val_loss, path):
+        """Saves everything needed to resume training."""
         state = {
             'epoch': epoch,
-            'model_state': self.model.state_dict(),
-            'optimizer_state': self.optimizer.state_dict(),
-            'best_val_loss': self.best_val_loss
+            'model_state_dict': self.model.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'best_val_loss': val_loss,
         }
-        torch.save(state, os.path.join(self.log_dir, 'latest_checkpoint.pth'))
-        
-        if val_loss < self.best_val_loss:
-            self.best_val_loss = val_loss
-            torch.save(state, os.path.join(self.log_dir, 'best_model.pth'))
-            print(f"  [Save] New Best Model (Loss: {val_loss:.4f})")
+        torch.save(state, path)
+        print(f"--- Checkpoint saved to {path} (Epoch {epoch}) ---")
 
-@torch.no_grad()
-def test_model(model, loader, scaler, device):
-    """Full test cycle with per-horizon metrics."""
-    model.eval()
-    preds, reals = [], []
-    
-    for x, y, vmd in loader:
-        x, vmd = x.to(device), vmd.to(device)
-        pred = model(x, vmd)
-        preds.append(scaler.inverse_transform(pred))
-        reals.append(scaler.inverse_transform(y.to(device)))
+    def load_checkpoint(self, path):
+        print(f"--- Loading checkpoint from {path} ---")
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         
-    preds = torch.cat(preds, dim=0)
-    reals = torch.cat(reals, dim=0)
+        self.model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+        
+        try:
+            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        except:
+            print("Warning: Optimizer state could not be fully loaded. Resetting optimizer.")
+            
+        return checkpoint['epoch'], checkpoint['best_val_loss']
+
+    def train_step(self, x, y_real, vmd_data): 
+        self.model.train()
+        self.optimizer.zero_grad()
+        
+        x_in = x.permute(0, 3, 2, 1)
+        
+        preds, _ = self.model(vmd_data, x_in)
+
+        preds = preds.transpose(1, 3)
+        preds_scaled = self.scaler.inverse_transform(preds)
+        real_scaled = torch.unsqueeze(y_real, 1)
+        
+        loss = self.loss_fn(preds_scaled, real_scaled, 0.0)
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), 5)
+        self.optimizer.step()
+        
+        return loss.item(), metric(preds_scaled, real_scaled)
+
+    def eval_step(self, x, y_real, vmd_data):
+        """
+        Fixed eval_step that matches train_step's shape handling.
+        Returns aggregated metrics (not per-horizon).
+        """
+        self.model.eval()
+        x_in = x.permute(0, 3, 2, 1)
+        
+        with torch.no_grad():
+            preds, _ = self.model(vmd_data, x_in)
+            
+        preds = preds.transpose(1, 3)
+        preds_scaled = self.scaler.inverse_transform(preds)
+        
+        real_scaled = torch.unsqueeze(y_real, 1)
+        
+        loss = self.loss_fn(preds_scaled, real_scaled, 0.0).item()
+        metrics = metric(preds_scaled, real_scaled)
+        
+        return loss, metrics
+
+
+
+def test_model(trainer, dataloader, device, model_path):
+    """
+    Fixed test_model that works with the simplified eval_step.
+    Computes per-horizon metrics by slicing predictions.
+    """
+    print(f"\n>> Loading best model from {model_path} ...")
+    trainer.model.load_state_dict(torch.load(model_path, weights_only=False))
+    trainer.model.eval()
     
-    maes, mapes, rmses = metric_per_horizon(preds, reals)
+    horizon_mae = [[] for _ in range(trainer.args.output_len)]
+    horizon_mape = [[] for _ in range(trainer.args.output_len)]
+    horizon_rmse = [[] for _ in range(trainer.args.output_len)]
     
-    print("\n" + "="*30)
-    print("      TEST RESULTS")
-    print("="*30)
-    for i in range(len(maes)):
-        print(f"Horizon {i+1:02d} | MAE: {maes[i]:.4f} | MAPE: {mapes[i]:.4f} | RMSE: {rmses[i]:.4f}")
+    print(">> Starting Detailed Horizon Evaluation...")
     
-    avg_mae, avg_mape, avg_rmse, _ = metric(preds, reals)
-    print("-"*30)
-    print(f"OVERALL    | MAE: {avg_mae:.4f} | MAPE: {avg_mape:.4f} | RMSE: {avg_rmse:.4f}")
-    print("="*30)
+    for x, y, vmd in tqdm(dataloader["test_loader"].get_iterator(), desc="Testing"):
+        tx = torch.Tensor(x).to(device).transpose(1, 3)
+        ty = torch.Tensor(y).to(device).transpose(1, 3)[:, 0, :, :]
+        tvmd = torch.Tensor(vmd).to(device)
+        
+        x_in = tx.permute(0, 3, 2, 1)
+        with torch.no_grad():
+            preds, _ = trainer.model(tvmd, x_in)
+        
+        preds_scaled = trainer.scaler.inverse_transform(preds)
+        real_scaled = ty.permute(0, 2, 1).unsqueeze(-1)
+        
+        for t in range(trainer.args.output_len):
+            p = preds_scaled[:, t, ...]
+            r = real_scaled[:, t, ...]
+            
+            horizon_mae[t].append(MAE_torch(p, r, 0).item())
+            horizon_mape[t].append(MAPE_torch(p, r, 0).item())
+            horizon_rmse[t].append(RMSE_torch(p, r, 0).item())
+
+    print("\n" + "="*50)
+    print(f"{'Horizon':<10} | {'MAE':<10} | {'MAPE':<10} | {'RMSE':<10}")
+    print("-" * 50)
     
-    return preds, reals
+    total_mae, total_mape, total_rmse = [], [], []
+    
+    for i in range(trainer.args.output_len):
+        m_mae = np.mean(horizon_mae[i])
+        m_mape = np.mean(horizon_mape[i])
+        m_rmse = np.mean(horizon_rmse[i])
+        
+        total_mae.append(m_mae)
+        total_mape.append(m_mape)
+        total_rmse.append(m_rmse)
+        
+        print(f"Step {i+1:02d}    | {m_mae:<10.4f} | {m_mape:<10.4f} | {m_rmse:<10.4f}")
+    
+    print("-" * 50)
+    print(f"AVERAGE    | {np.mean(total_mae):<10.4f} | {np.mean(total_mape):<10.4f} | {np.mean(total_rmse):<10.4f}")
+    print("="*50)
