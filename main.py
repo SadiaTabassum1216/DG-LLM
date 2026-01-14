@@ -7,9 +7,7 @@ from trainer import VMD_Trainer, test_model
 from visualization import visualize_model_predictions, verify_temporal_features
 from utils import load_pickle
 
-# ============================================================================
-# ARGS (EXACT NOTEBOOK VERSION)
-# ============================================================================
+
 class Args:
     """Configurable arguments for DG-LLM - matching notebook configuration."""
     def __init__(self):

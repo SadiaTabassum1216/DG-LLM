@@ -7,9 +7,6 @@ from transformers.modeling_outputs import BaseModelOutputWithPastAndCrossAttenti
 from peft import get_peft_model, LoraConfig
 from torch.utils.checkpoint import checkpoint
 
-# ============================================================================
-# 1. CUSTOM GPT-2 ATTENTION WITH PAIRWISE BIAS
-# ============================================================================
 class CustomGPT2Attention(GPT2Attention):
     """
     Extends HF GPT2Attention to accept attn_bias: [B, H, Tq, Tk] (additive; 0 allow, -inf block).
@@ -100,9 +97,6 @@ class CustomGPT2Attention(GPT2Attention):
         return outputs
 
 
-# ============================================================================
-# 2. CUSTOM GPT-2 BLOCK
-# ============================================================================
 class CustomGPT2Block(GPT2Block):
     """Same as GPT2Block, but passes attn_bias through to attention."""
 
@@ -149,9 +143,6 @@ class CustomGPT2Block(GPT2Block):
         return outputs
 
 
-# ============================================================================
-# 3. PATCHING FUNCTION
-# ============================================================================
 def patch_gpt2_for_pairwise_mask(gpt2_model):
     """
     Safely patch in-place without calling __init__ on GPT-2 internals.
@@ -162,9 +153,6 @@ def patch_gpt2_for_pairwise_mask(gpt2_model):
         blk.__class__ = CustomGPT2Block
 
 
-# ============================================================================
-# 4. ADJACENCY TO PAIRWISE BIAS
-# ============================================================================
 def adjacency_to_pairwise_bias(adj, B, H, device, dtype):
     """
     adj: [T, T] with 1 (allow) / 0 (block)
@@ -177,10 +165,6 @@ def adjacency_to_pairwise_bias(adj, B, H, device, dtype):
     add = add.view(1, 1, T, T).expand(B, H, T, T)
     return add
 
-
-# ============================================================================
-# 5. PFA - PRE-TRAINED FOUNDATION ADAPTER (EXACT NOTEBOOK VERSION)
-# ============================================================================
 class PFA(nn.Module):
     """
     Pre-trained Foundation Adapter: GPT-2 backbone with LoRA fine-tuning
