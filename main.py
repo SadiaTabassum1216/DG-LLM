@@ -2,53 +2,77 @@ import torch
 import os
 import random
 import numpy as np
+import argparse
 from data_loader import load_dataset_optimized
 from trainer import VMD_Trainer, test_model
 from visualization import visualize_model_predictions, verify_temporal_features
 from utils import load_pickle
 
 
-class Args:
-    """Configurable arguments for DG-LLM - matching notebook configuration."""
-    def __init__(self):
-        # Dataset
-        self.data = 'PEMSD04'  # Options: 'PEMSD04', 'PEMSD08', 'bike_drop', 'bike_pick', 'taxi_drop', 'taxi_pick'
-        self.root_path = './Dataset/'
-        self.data_path = os.path.join(self.root_path, self.data, 'processed')
-        
-        # Dataset-specific node counts
-        if 'PEMSD04' in self.data:
-            self.num_nodes = 307
-        elif 'PEMSD08' in self.data:
-            self.num_nodes = 170
-        elif 'bike' in self.data:
-            self.num_nodes = 250
-        elif 'taxi' in self.data:
-            self.num_nodes = 266
-        else:
-            self.num_nodes = 307  # Default
-        
-        # Input/Output dimensions (matching notebook)
-        self.input_dim = 3  # Flow, ToD, DoW
-        self.input_len = 12
-        self.output_len = 12
-        
-        # GPT-2 / Model settings (matching notebook)
-        self.llm_layer = 6  # Number of GPT-2 layers
-        self.U = 1  # Top U layers are fully trainable
-        
-        # VMD
-        self.vmd_k = 3  # Number of VMD modes
-        
-        # Training (matching notebook)
-        self.lrate = 1e-3  # Learning rate
-        self.wdecay = 1e-5  # Weight decay
-        self.batch_size = 32
-        self.epochs = 50
-        self.log_dir = './logs'
-        
-        # Device
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+def parse_args():
+    """Parse command-line arguments for DG-LLM training."""
+    parser = argparse.ArgumentParser(description='DG-LLM: Dynamic Graph LLM for Traffic Forecasting')
+    
+    # Dataset
+    parser.add_argument('--data', type=str, default='PEMSD04',
+                        choices=['PEMSD04', 'PEMSD08', 'bike_drop', 'bike_pick', 'taxi_drop', 'taxi_pick'],
+                        help='Dataset name (default: PEMSD04)')
+    parser.add_argument('--root_path', type=str, default='./Dataset/',
+                        help='Root path for datasets (default: ./Dataset/)')
+    
+    # Training
+    parser.add_argument('--epochs', type=int, default=50,
+                        help='Number of training epochs (default: 50)')
+    parser.add_argument('--batch_size', type=int, default=8,
+                        help='Batch size (default: 8)')
+    parser.add_argument('--lrate', type=float, default=1e-3,
+                        help='Learning rate (default: 1e-3)')
+    parser.add_argument('--wdecay', type=float, default=1e-5,
+                        help='Weight decay (default: 1e-5)')
+    
+    # Model
+    parser.add_argument('--llm_layer', type=int, default=6,
+                        help='Number of GPT-2 layers to use (default: 6)')
+    parser.add_argument('--U', type=int, default=1,
+                        help='Top U layers are fully trainable (default: 1)')
+    parser.add_argument('--vmd_k', type=int, default=3,
+                        help='Number of VMD modes (default: 3)')
+    
+    # I/O dimensions
+    parser.add_argument('--input_dim', type=int, default=3,
+                        help='Input dimension (Flow, ToD, DoW) (default: 3)')
+    parser.add_argument('--input_len', type=int, default=12,
+                        help='Input sequence length (default: 12)')
+    parser.add_argument('--output_len', type=int, default=12,
+                        help='Output/prediction length (default: 12)')
+    
+    # Misc
+    parser.add_argument('--log_dir', type=str, default='./logs',
+                        help='Directory for saving logs and checkpoints (default: ./logs)')
+    parser.add_argument('--seed', type=int, default=42,
+                        help='Random seed (default: 42)')
+    
+    args = parser.parse_args()
+    
+    # Derived attributes
+    args.data_path = os.path.join(args.root_path, args.data, 'processed')
+    
+    # Dataset-specific node counts
+    if 'PEMSD04' in args.data:
+        args.num_nodes = 307
+    elif 'PEMSD08' in args.data:
+        args.num_nodes = 170
+    elif 'bike' in args.data:
+        args.num_nodes = 250
+    elif 'taxi' in args.data:
+        args.num_nodes = 266
+    else:
+        args.num_nodes = 307  # Default
+    
+    # Device
+    args.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    return args
 
 
 def seed_everything(seed=42):
@@ -61,8 +85,8 @@ def seed_everything(seed=42):
 
 
 def main():
-    args = Args()
-    seed_everything()
+    args = parse_args()
+    seed_everything(args.seed)
     
     print(f"{'='*60}")
     print(f"  DG-LLM Training - {args.data}")
