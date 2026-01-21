@@ -1,4 +1,5 @@
 import numpy as np
+import os
 from vmdpy import VMD
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from tqdm import tqdm
@@ -49,13 +50,15 @@ def precompute_vmd(data_x, vmd_k=3, max_workers=4):
     T = data_x.shape[1]
     N = data_x.shape[2]
     
+    # Use all available CPU cores for maximum parallelism
+    actual_workers = max(max_workers, os.cpu_count() or 4)
     print(f"  > Starting VMD on {num_samples} windows (Len={T})...")
     print(f"  > Mode: Sample-wise")
-    print(f"  > Workers: {max_workers}")
+    print(f"  > Workers: {actual_workers}")
     
     vmd_storage = np.zeros((num_samples, vmd_k, T, N, 1), dtype=np.float32)
     
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+    with ProcessPoolExecutor(max_workers=actual_workers) as executor:
         futures = {
             executor.submit(decompose_single_window, data_x[i], K=vmd_k): i 
             for i in range(num_samples)

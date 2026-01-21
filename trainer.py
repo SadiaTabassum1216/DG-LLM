@@ -7,20 +7,30 @@ from utils import Ranger, MAE_torch, MAPE_torch, RMSE_torch, metric
 
 
 class VMD_Trainer:
-    def __init__(self, args, scaler, adj_mx, device):
+    def __init__(self, args, scaler, adj_mx, device, lightweight=False):
         self.args = args
         self.device = device
         self.scaler = scaler
+        self.lightweight = lightweight
         
-        from model import DGLLM
-        self.model = DGLLM(
+        from model import DGLLM, LightweightDGLLM
+        
+        # Use lightweight model if enabled
+        ModelClass = LightweightDGLLM if lightweight else DGLLM
+        self.model = ModelClass(
             device, adj_mx, args.input_dim, args.num_nodes, 
             args.input_len, args.output_len, args.llm_layer, args.U,
-            vmd_K=3
+            vmd_K=args.vmd_k
         ).to(device)
         
         self.optimizer = Ranger(self.model.parameters(), lr=args.lrate, weight_decay=args.wdecay)
         self.loss_fn = MAE_torch
+        
+        # Mixed precision training (FP16) - major speedup on modern GPUs
+        self.use_amp = lightweight and device.type == 'cuda'
+        if self.use_amp:
+            self.grad_scaler = torch.cuda.amp.GradScaler()
+            print("  >> Mixed Precision (FP16) ENABLED")
         
         self.log_dir = args.log_dir
         os.makedirs(self.log_dir, exist_ok=True)
@@ -33,6 +43,7 @@ class VMD_Trainer:
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'best_val_loss': val_loss,
+            'lightweight': self.lightweight,
         }
         torch.save(state, path)
         print(f"--- Checkpoint saved to {path} (Epoch {epoch}) ---")
@@ -56,16 +67,30 @@ class VMD_Trainer:
         
         x_in = x.permute(0, 3, 2, 1)
         
-        preds, _ = self.model(vmd_data, x_in)
-
-        preds = preds.transpose(1, 3)
-        preds_scaled = self.scaler.inverse_transform(preds)
-        real_scaled = torch.unsqueeze(y_real, 1)
-        
-        loss = self.loss_fn(preds_scaled, real_scaled, 0.0)
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), 5)
-        self.optimizer.step()
+        if self.use_amp:
+            # Mixed precision forward pass
+            with torch.cuda.amp.autocast():
+                preds, _ = self.model(vmd_data, x_in)
+                preds = preds.transpose(1, 3)
+                preds_scaled = self.scaler.inverse_transform(preds)
+                real_scaled = torch.unsqueeze(y_real, 1)
+                loss = self.loss_fn(preds_scaled, real_scaled, 0.0)
+            
+            # Scaled backward pass
+            self.grad_scaler.scale(loss).backward()
+            self.grad_scaler.unscale_(self.optimizer)
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 5)
+            self.grad_scaler.step(self.optimizer)
+            self.grad_scaler.update()
+        else:
+            preds, _ = self.model(vmd_data, x_in)
+            preds = preds.transpose(1, 3)
+            preds_scaled = self.scaler.inverse_transform(preds)
+            real_scaled = torch.unsqueeze(y_real, 1)
+            loss = self.loss_fn(preds_scaled, real_scaled, 0.0)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 5)
+            self.optimizer.step()
         
         return loss.item(), metric(preds_scaled, real_scaled)
 

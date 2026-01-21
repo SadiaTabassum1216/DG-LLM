@@ -55,6 +55,8 @@ def parse_args():
                         help='Skip training, only run testing and visualization')
     parser.add_argument('--visualize', action='store_true',
                         help='Generate visualizations after testing')
+    parser.add_argument('--lightweight', action='store_true',
+                        help='Enable lightweight mode (FP16, shared backbone, graph caching)')
     
     args = parser.parse_args()
     
@@ -122,7 +124,12 @@ def main():
 
     # 3. Initialize Trainer
     print("\n>> Initializing Model...")
-    trainer = VMD_Trainer(args, data['scaler'], adj_mx, args.device)
+    trainer = VMD_Trainer(args, data['scaler'], adj_mx, args.device, lightweight=args.lightweight)
+    if args.lightweight:
+        print("  >> LIGHTWEIGHT MODE ENABLED")
+        print("     - FP16 mixed precision")
+        print("     - Shared GPT-2 backbone")
+        print("     - Graph caching for inference")
     print(f"   Total parameters: {trainer.model.param_num():,}")
 
     # 4. Check for existing checkpoint
