@@ -13,11 +13,11 @@ class VMD_Trainer:
         self.scaler = scaler
         self.lightweight = lightweight
         
-        from model import DGLLM, LightweightDGLLM
+        from model import DGLLM
         
-        # Use lightweight model if enabled
-        ModelClass = LightweightDGLLM if lightweight else DGLLM
-        self.model = ModelClass(
+        # Always use original DGLLM to preserve accuracy
+        # lightweight mode only enables FP16, no architecture changes
+        self.model = DGLLM(
             device, adj_mx, args.input_dim, args.num_nodes, 
             args.input_len, args.output_len, args.llm_layer, args.U,
             vmd_K=args.vmd_k

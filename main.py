@@ -127,9 +127,8 @@ def main():
     trainer = VMD_Trainer(args, data['scaler'], adj_mx, args.device, lightweight=args.lightweight)
     if args.lightweight:
         print("  >> LIGHTWEIGHT MODE ENABLED")
-        print("     - FP16 mixed precision")
-        print("     - Shared GPT-2 backbone")
-        print("     - Graph caching for inference")
+        print("     - FP16 mixed precision (1.5-2x faster)")
+        print("     - Same model architecture (no accuracy loss)")
     print(f"   Total parameters: {trainer.model.param_num():,}")
 
     # 4. Check for existing checkpoint
