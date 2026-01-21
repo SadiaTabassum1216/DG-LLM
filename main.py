@@ -51,6 +51,10 @@ def parse_args():
                         help='Directory for saving logs and checkpoints (default: ./logs)')
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed (default: 42)')
+    parser.add_argument('--test_only', action='store_true',
+                        help='Skip training, only run testing and visualization')
+    parser.add_argument('--visualize', action='store_true',
+                        help='Generate visualizations after testing')
     
     args = parser.parse_args()
     
@@ -132,53 +136,57 @@ def main():
         start_epoch += 1
         print(f"   Resuming from epoch {start_epoch}")
 
-    # 5. Training Loop
-    print(f"\n>> Starting Training from Epoch {start_epoch}...")
-    for epoch in range(start_epoch, args.epochs + 1):
-        # Train
-        epoch_loss = []
-        epoch_metrics = []
-        
-        for x, y, vmd in data['train_loader'].get_iterator():
-            tx = torch.Tensor(x).to(args.device).transpose(1, 3)
-            ty = torch.Tensor(y).to(args.device).transpose(1, 3)[:, 0, :, :]
-            tvmd = torch.Tensor(vmd).to(args.device)
-            
-            loss, metrics = trainer.train_step(tx, ty, tvmd)
-            epoch_loss.append(loss)
-            epoch_metrics.append(metrics)
-        
-        avg_train_loss = np.mean(epoch_loss)
-        avg_train_mae = np.mean([m[0] for m in epoch_metrics])
-        
-        # Evaluate
-        val_loss = []
-        val_metrics = []
-        
-        for x, y, vmd in data['val_loader'].get_iterator():
-            tx = torch.Tensor(x).to(args.device).transpose(1, 3)
-            ty = torch.Tensor(y).to(args.device).transpose(1, 3)[:, 0, :, :]
-            tvmd = torch.Tensor(vmd).to(args.device)
-            
-            loss, metrics = trainer.eval_step(tx, ty, tvmd)
-            val_loss.append(loss)
-            val_metrics.append(metrics)
-        
-        avg_val_loss = np.mean(val_loss)
-        avg_val_mae = np.mean([m[0] for m in val_metrics])
-        avg_val_rmse = np.mean([m[2] for m in val_metrics])
-        
-        print(f"Epoch {epoch:03d} | Train Loss: {avg_train_loss:.4f} | Val MAE: {avg_val_mae:.4f} | Val RMSE: {avg_val_rmse:.4f}")
-        
-        # Save checkpoint
-        trainer.save_checkpoint(epoch, avg_val_loss, os.path.join(args.log_dir, 'latest_checkpoint.pth'))
-        
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
-            torch.save(trainer.model.state_dict(), os.path.join(args.log_dir, 'best_model.pth'))
-            print(f"  >> New Best Model Saved (Val Loss: {avg_val_loss:.4f})")
 
-    # 6. Testing
+    # 5. Training Loop (skip if --test_only)
+    if not args.test_only:
+        print(f"\n>> Starting Training from Epoch {start_epoch}...")
+        for epoch in range(start_epoch, args.epochs + 1):
+            # Train
+            epoch_loss = []
+            epoch_metrics = []
+            
+            for x, y, vmd in data['train_loader'].get_iterator():
+                tx = torch.Tensor(x).to(args.device).transpose(1, 3)
+                ty = torch.Tensor(y).to(args.device).transpose(1, 3)[:, 0, :, :]
+                tvmd = torch.Tensor(vmd).to(args.device)
+                
+                loss, metrics = trainer.train_step(tx, ty, tvmd)
+                epoch_loss.append(loss)
+                epoch_metrics.append(metrics)
+            
+            avg_train_loss = np.mean(epoch_loss)
+            avg_train_mae = np.mean([m[0] for m in epoch_metrics])
+            
+            # Evaluate
+            val_loss = []
+            val_metrics = []
+            
+            for x, y, vmd in data['val_loader'].get_iterator():
+                tx = torch.Tensor(x).to(args.device).transpose(1, 3)
+                ty = torch.Tensor(y).to(args.device).transpose(1, 3)[:, 0, :, :]
+                tvmd = torch.Tensor(vmd).to(args.device)
+                
+                loss, metrics = trainer.eval_step(tx, ty, tvmd)
+                val_loss.append(loss)
+                val_metrics.append(metrics)
+            
+            avg_val_loss = np.mean(val_loss)
+            avg_val_mae = np.mean([m[0] for m in val_metrics])
+            avg_val_rmse = np.mean([m[2] for m in val_metrics])
+            
+            print(f"Epoch {epoch:03d} | Train Loss: {avg_train_loss:.4f} | Val MAE: {avg_val_mae:.4f} | Val RMSE: {avg_val_rmse:.4f}")
+            
+            # Save checkpoint
+            trainer.save_checkpoint(epoch, avg_val_loss, os.path.join(args.log_dir, 'latest_checkpoint.pth'))
+            
+            if avg_val_loss < best_val_loss:
+                best_val_loss = avg_val_loss
+                torch.save(trainer.model.state_dict(), os.path.join(args.log_dir, 'best_model.pth'))
+                print(f"  >> New Best Model Saved (Val Loss: {avg_val_loss:.4f})")
+    else:
+        print("\n>> Skipping training (--test_only mode)")
+
+    # 7. Testing
     print("\n" + "="*60)
     print("  TESTING BEST MODEL")
     print("="*60)
@@ -188,6 +196,48 @@ def main():
     else:
         print("No best model found. Testing with latest checkpoint...")
         test_model(trainer, data, args.device, latest_ckpt)
+
+    # 8. Visualization (if --visualize flag is set)
+    if args.visualize:
+        print("\n" + "="*60)
+        print("  GENERATING VISUALIZATIONS")
+        print("="*60)
+        
+        # Load best model for visualization
+        if os.path.exists(best_model_path):
+            trainer.model.load_state_dict(torch.load(best_model_path, weights_only=False))
+        trainer.model.eval()
+        
+        # Collect predictions
+        all_preds = []
+        all_reals = []
+        
+        with torch.no_grad():
+            for x, y, vmd in data['test_loader'].get_iterator():
+                tx = torch.Tensor(x).to(args.device).transpose(1, 3)
+                ty = torch.Tensor(y).to(args.device).transpose(1, 3)[:, 0, :, :]
+                tvmd = torch.Tensor(vmd).to(args.device)
+                x_in = tx.permute(0, 3, 2, 1)  # [B, T, N, F]
+                
+                pred, _ = trainer.model(tvmd, x_in)
+                preds_unscaled = data['scaler'].inverse_transform(pred)
+                reals_unscaled = data['scaler'].inverse_transform(ty.permute(0, 2, 1).unsqueeze(-1))
+                
+                all_preds.append(preds_unscaled)
+                all_reals.append(reals_unscaled)
+        
+        preds = torch.cat(all_preds, dim=0)
+        reals = torch.cat(all_reals, dim=0)
+        
+        print(f"Predictions shape: {preds.shape}")
+        print(f"Reals shape: {reals.shape}")
+        
+        # Generate plots
+        visualize_model_predictions(preds, reals, node_idx=0, horizon_idx=0)
+        visualize_advanced_diagnostics(preds, reals, node_idx=0)
+        visualize_weekly_horizon1(preds, reals, node_idx=0)
+        
+        print("\n>> Visualizations complete!")
 
 
 if __name__ == "__main__":
