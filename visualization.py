@@ -2,19 +2,26 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import torch
 import numpy as np
+import os
 
-def visualize_model_predictions(preds, reals, node_idx=0, horizon_idx=0, num_samples=288):
+def visualize_model_predictions(preds, reals, node_idx=0, horizon_idx=0, num_samples=288, save_dir='./logs'):
     """Compare Predicted vs Real values for a specific node and horizon."""
+    os.makedirs(save_dir, exist_ok=True)
     plt.figure(figsize=(15, 5))
     plt.plot(reals[:num_samples, horizon_idx, node_idx, 0].cpu().numpy(), label='Ground Truth', color='blue', alpha=0.7)
     plt.plot(preds[:num_samples, horizon_idx, node_idx, 0].cpu().numpy(), label='Prediction', color='red', linestyle='--')
     plt.title(f"Node {node_idx} - Horizon {horizon_idx+1} Forecast")
     plt.legend()
     plt.grid(True, alpha=0.3)
-    plt.show()
+    save_path = os.path.join(save_dir, f'predictions_node{node_idx}_h{horizon_idx}.png')
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"  Saved: {save_path}")
+    return save_path
 
-def visualize_advanced_diagnostics(preds, reals, node_idx=0):
+def visualize_advanced_diagnostics(preds, reals, node_idx=0, save_dir='./logs'):
     """Plot Error Distribution and Prediction vs Truth Scatter."""
+    os.makedirs(save_dir, exist_ok=True)
     p = preds[:, 0, node_idx, 0].cpu().numpy()
     r = reals[:, 0, node_idx, 0].cpu().numpy()
     errors = p - r
@@ -33,10 +40,15 @@ def visualize_advanced_diagnostics(preds, reals, node_idx=0):
     axes[1].set_title("Prediction vs Ground Truth")
     
     plt.tight_layout()
-    plt.show()
+    save_path = os.path.join(save_dir, f'diagnostics_node{node_idx}.png')
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"  Saved: {save_path}")
+    return save_path
 
-def visualize_weekly_horizon1(preds, reals, node_idx=0):
+def visualize_weekly_horizon1(preds, reals, node_idx=0, save_dir='./logs'):
     """Zoomed in view of 1-week of forecasts."""
+    os.makedirs(save_dir, exist_ok=True)
     # 288 steps/day * 7 days = 2016 steps
     steps = min(2016, preds.shape[0])
     plt.figure(figsize=(20, 6))
@@ -44,7 +56,11 @@ def visualize_weekly_horizon1(preds, reals, node_idx=0):
     plt.plot(preds[:steps, 0, node_idx, 0].cpu().numpy(), label='Pred', color='orange', alpha=0.8)
     plt.title(f"Weekly Flow Patterns - Node {node_idx}")
     plt.legend()
-    plt.show()
+    save_path = os.path.join(save_dir, f'weekly_node{node_idx}.png')
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"  Saved: {save_path}")
+    return save_path
 
 def verify_temporal_features(data_loader):
     """Sanity check for TOD and DOW features."""
