@@ -29,7 +29,7 @@ class VMD_Trainer:
         # Mixed precision training (FP16) - major speedup on modern GPUs
         self.use_amp = lightweight and device.type == 'cuda'
         if self.use_amp:
-            self.grad_scaler = torch.cuda.amp.GradScaler()
+            self.grad_scaler = torch.amp.GradScaler('cuda')
             print("  >> Mixed Precision (FP16) ENABLED")
         
         self.log_dir = args.log_dir
@@ -69,7 +69,7 @@ class VMD_Trainer:
         
         if self.use_amp:
             # Mixed precision forward pass
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast('cuda'):
                 preds, _ = self.model(vmd_data, x_in)
                 preds = preds.transpose(1, 3)
                 preds_scaled = self.scaler.inverse_transform(preds)

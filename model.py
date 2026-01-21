@@ -385,6 +385,26 @@ class LightweightDGLLM(nn.Module):
         self.gat_k = nn.Linear(to_gpt_channel, to_gpt_channel, bias=False)
         self.gat_a = nn.Parameter(torch.randn(4, 2 * to_gpt_channel, 1) * (1.0 / math.sqrt(to_gpt_channel)))
         
+        # GAT hyperparameters (same as ModeProcessor)
+        self.heads = 4
+        self.head_dropout = 0.1
+        self.leaky_slope = 0.2
+        self.gat_tau = 1.0
+        self.ema_m = 0.99
+        self.eps = 1e-6
+        self.edge_dropout = 0.1
+        self.symmetrize = True
+        self.hysteresis_ratio = 0.8
+        self.warmup_steps = 500
+        self.p_keep = 0.15
+        self.mix_hi = 0.6
+        self.mix_lo = 0.2
+        
+        # Buffers for EMA and hysteresis
+        self.register_buffer("global_step", torch.zeros((), dtype=torch.long))
+        self.register_buffer("ema_A", torch.zeros((num_nodes, num_nodes)))
+        self.register_buffer("prev_A", torch.zeros((num_nodes, num_nodes)))
+        
         # Graph caching for inference
         self._cached_adj = None
         self._cache_valid = False
@@ -403,6 +423,19 @@ class LightweightDGLLM(nn.Module):
             nn.LayerNorm(output_len),
             nn.ReLU()
         )
+    
+    def _schedule(self):
+        """Curriculum learning schedule for mix ratio."""
+        t = float(self.global_step.item())
+        T = max(self.warmup_steps, 1)
+        mix = self.mix_hi + (self.mix_lo - self.mix_hi) * min(t / T, 1.0)
+        return None, mix
+
+    def _degree_prior(self, A):
+        """Compute degree-based prior for edge weighting."""
+        degree = A.sum(dim=-1, keepdim=True)
+        max_deg = degree.max() + 1e-6
+        return degree / max_deg
         
     def _temporal_ms_feats(self, history_data):
         """Shared temporal feature extraction."""
@@ -416,31 +449,87 @@ class LightweightDGLLM(nn.Module):
         return feats
 
     def _build_adjacency_fast(self, feats):
-        """Fast graph construction with caching for inference."""
+        """
+        Full GAT graph construction (same as ModeProcessor) with caching for inference.
+        feats: [B, S, D] -> returns binary [S, S] adjacency with
+        temperature, EMA smoothing, edge/head dropout, quantile selection,
+        degree prior, hysteresis, and warmup union.
+        """
+        # Use cache during inference
         if not self.training and self._cache_valid and self._cached_adj is not None:
             return self._cached_adj
             
         B, S, D = feats.shape
+        _, mix_alpha_curr = self._schedule()
+
+        # 1) GAT logits (multi-head) with head-dropout
         h = F.normalize(feats, dim=-1)
-        
-        # Simplified GAT - mean over heads
         q = self.gat_q(h)
         k = self.gat_k(h)
-        
-        # Efficient attention computation
-        logits = torch.bmm(q, k.transpose(1, 2)) / math.sqrt(D)
-        A_prob = torch.softmax(logits, dim=-1).mean(dim=0)
-        
-        # Blend with fixed adjacency
+        qi = q.unsqueeze(2).expand(-1, -1, S, -1)
+        kj = k.unsqueeze(1).expand(-1, S, -1, -1)
+        pair = torch.cat([qi, kj], dim=-1)
+
+        logits_per_head = []
+        H = self.gat_a.size(0)
+        for hidx in range(H):
+            if self.training and self.head_dropout > 0 and torch.rand(()) < self.head_dropout:
+                continue
+            a = self.gat_a[hidx]
+            e = torch.matmul(pair, a).squeeze(-1)
+            e = F.leaky_relu(e, self.leaky_slope)
+            logits_per_head.append(e)
+        if len(logits_per_head) == 0:
+            a = self.gat_a[0]
+            e = F.leaky_relu(torch.matmul(pair, a).squeeze(-1), self.leaky_slope)
+            logits_per_head = [e]
+
+        logits = torch.stack(logits_per_head, dim=1).mean(dim=1)
+        logits = logits / max(self.gat_tau, 1e-6)
+        A_prob = torch.softmax(logits, dim=-1)
+
+        # 2) EMA smoothing
+        A_mean = A_prob.mean(dim=0).detach()
+        self.ema_A = self.ema_m * self.ema_A + (1.0 - self.ema_m) * A_mean
+
         fixed = (self.adj_mx > 0).float()
-        fixed = fixed / (fixed.sum(-1, keepdim=True) + 1e-6)
-        A_blend = 0.5 * A_prob + 0.5 * fixed
-        
-        # Binary threshold
-        thresh = torch.quantile(A_blend, 0.85, dim=-1, keepdim=True)
-        A_bin = (A_blend >= thresh).float()
+        fixed = fixed / (fixed.sum(-1, keepdim=True) + self.eps)
+        A_blend = (1.0 - mix_alpha_curr) * self.ema_A + mix_alpha_curr * fixed
+
+        # 3) edge dropout
+        if self.training and self.edge_dropout > 0:
+            keep = (torch.rand_like(A_blend) > self.edge_dropout).float()
+            A_blend = A_blend * keep
+
+        # 4) degree prior
+        prior = self._degree_prior(A_blend)
+        A_blend = A_blend * (0.8 + 0.2 * prior)
+
+        # 5) ADAPTIVE DENSITY (quantile)
+        A_work = A_blend.clone()
+        A_work.fill_diagonal_(0.0)
+        p = float(self.p_keep)
+        p = min(max(p, 1e-3), 0.99)
+        thresh = torch.quantile(A_work, 1.0 - p, dim=-1, keepdim=True)
+        A_bin = (A_work >= thresh).float()
+
+        # 6) self-loops; symmetrize
         A_bin.fill_diagonal_(1.0)
-        
+        if self.symmetrize:
+            A_bin = torch.maximum(A_bin, A_bin.t())
+
+        # 7) HYSTERESIS
+        row_mean = A_work.mean(dim=-1, keepdim=True)
+        low_mask = (A_work < (row_mean * self.hysteresis_ratio)).float()
+        keep_prev = self.prev_A * (1.0 - low_mask)
+        A_bin = torch.clamp(A_bin + keep_prev, 0.0, 1.0)
+        self.prev_A = A_bin.detach()
+
+        # 8) warmup: union with fixed graph
+        self.global_step += 1
+        if self.global_step.item() < self.warmup_steps:
+            A_bin = torch.maximum(A_bin, (self.adj_mx > 0).float())
+
         # Cache for inference
         if not self.training:
             self._cached_adj = A_bin
