@@ -38,6 +38,10 @@ Traffic forecasting is a crucial part of urban planning, and it is critical to u
 
 The datasets are available on Google Drive: **[Datasets](https://drive.google.com/file/d/19LkZXBCS7E2SCuM2ZQ7YKT7L0-wMXrJa/view?usp=sharing)**
 
+## Run on Kaggle
+
+[![Open in Kaggle](https://kaggle.com/static/images/open-in-kaggle.svg)](https://www.kaggle.com/code/sadia1216/dgllm)
+
 ## Dataset Format
 
 ```
@@ -53,21 +57,6 @@ Dataset/
 ├── bike_pick/              # 250 nodes
 ├── taxi_drop/              # 266 nodes
 └── taxi_pick/              # 266 nodes
-```
-
-## Configuration
-
-Edit `main.py` to change settings:
-
-```python
-class Args:
-    def __init__(self):
-        self.data = 'PEMSD04'    # Dataset: 'PEMSD04', 'PEMSD08', 'bike_drop', 'taxi_pick', etc.
-        self.batch_size = 32
-        self.epochs = 50
-        self.lrate = 1e-3        # Learning rate
-        self.llm_layer = 6       # GPT-2 layers to use
-        self.U = 1               # Top layers to keep trainable
 ```
 
 ## Model Components
