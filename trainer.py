@@ -7,16 +7,13 @@ from utils import Ranger, MAE_torch, MAPE_torch, RMSE_torch, metric
 
 
 class VMD_Trainer:
-    def __init__(self, args, scaler, adj_mx, device, lightweight=False):
+    def __init__(self, args, scaler, adj_mx, device):
         self.args = args
         self.device = device
         self.scaler = scaler
-        self.lightweight = lightweight
         
         from model import DGLLM
         
-        # Always use original DGLLM to preserve accuracy
-        # lightweight mode only enables FP16, no architecture changes
         self.model = DGLLM(
             device, adj_mx, args.input_dim, args.num_nodes, 
             args.input_len, args.output_len, args.llm_layer, args.U,
@@ -26,11 +23,11 @@ class VMD_Trainer:
         self.optimizer = Ranger(self.model.parameters(), lr=args.lrate, weight_decay=args.wdecay)
         self.loss_fn = MAE_torch
         
-        # Mixed precision training (FP16) - major speedup on modern GPUs
-        self.use_amp = lightweight and device.type == 'cuda'
+        # FP16 mixed precision - enabled by default on CUDA for 1.5-2x speedup
+        self.use_amp = device.type == 'cuda'
         if self.use_amp:
             self.grad_scaler = torch.amp.GradScaler('cuda')
-            print("  >> Mixed Precision (FP16) ENABLED")
+            print("  >> FP16 Mixed Precision ENABLED")
         
         self.log_dir = args.log_dir
         os.makedirs(self.log_dir, exist_ok=True)
