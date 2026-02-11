@@ -64,23 +64,10 @@ Dataset/
 | Component | Description |
 |-----------|-------------|
 | `DGLLM` | Main model combining K VMD mode branches |
+| `TemporalEmbedding` | Learnable time-of-day/day-of-week embeddings |
 | `ModeProcessor` | Single mode processor with dynamic graph |
 | `PFA` | GPT-2 with LoRA and graph attention |
-| `TemporalEmbedding` | Learnable time-of-day/day-of-week embeddings |
 
-## Project Structure
-
-```
-DG-LLM/
-├── main.py              # Entry point and configuration
-├── model.py             # DGLLM and ModeProcessor
-├── backbone.py          # PFA (GPT-2 with LoRA)
-├── trainer.py           # Training and evaluation
-├── data_loader.py       # Dataset loading
-├── vmd_utils.py         # VMD decomposition
-├── utils.py             # Metrics and utilities
-└── visualization.py     # Plotting functions
-```
 
 ## Acknowledgements
 

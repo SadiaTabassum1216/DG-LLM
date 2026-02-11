@@ -20,8 +20,21 @@ class VMD_Trainer:
             vmd_K=args.vmd_k
         ).to(device)
         
+        # Enable torch.compile for ~30% speedup (PyTorch 2.0+)
+        if hasattr(args, 'enable_compile') and args.enable_compile:
+            if hasattr(torch, 'compile'):
+                self.model = torch.compile(self.model, mode='reduce-overhead')
+                print("  >> PyTorch compilation ENABLED (~30% speedup)")
+            else:
+                print("  >> WARNING: torch.compile not available (requires PyTorch 2.0+)")
+        
         self.optimizer = Ranger(self.model.parameters(), lr=args.lrate, weight_decay=args.wdecay)
         self.loss_fn = MAE_torch
+        
+        # Gradient accumulation for larger effective batch sizes
+        self.grad_accum_steps = getattr(args, 'grad_accum_steps', 1)
+        if self.grad_accum_steps > 1:
+            print(f"  >> Gradient Accumulation: {self.grad_accum_steps} steps (Effective batch = {args.batch_size * self.grad_accum_steps})")
         
         # FP16 mixed precision - enabled by default on CUDA for 1.5-2x speedup
         self.use_amp = device.type == 'cuda'
@@ -57,9 +70,12 @@ class VMD_Trainer:
             
         return checkpoint['epoch'], checkpoint['best_val_loss']
 
-    def train_step(self, x, y_real, vmd_data): 
+    def train_step(self, x, y_real, vmd_data, accumulation_step=0): 
         self.model.train()
-        self.optimizer.zero_grad()
+        
+        # Only zero gradients at the start of accumulation cycle
+        if accumulation_step == 0:
+            self.optimizer.zero_grad()
         
         x_in = x.permute(0, 3, 2, 1)
         
@@ -71,24 +87,37 @@ class VMD_Trainer:
                 preds_scaled = self.scaler.inverse_transform(preds)
                 real_scaled = torch.unsqueeze(y_real, 1)
                 loss = self.loss_fn(preds_scaled, real_scaled, 0.0)
+                
+                # Normalize loss for gradient accumulation
+                loss = loss / self.grad_accum_steps
             
             # Scaled backward pass
             self.grad_scaler.scale(loss).backward()
-            self.grad_scaler.unscale_(self.optimizer)
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 5)
-            self.grad_scaler.step(self.optimizer)
-            self.grad_scaler.update()
+            
+            # Only update weights at the end of accumulation cycle
+            if (accumulation_step + 1) % self.grad_accum_steps == 0:
+                self.grad_scaler.unscale_(self.optimizer)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 5)
+                self.grad_scaler.step(self.optimizer)
+                self.grad_scaler.update()
         else:
             preds, _ = self.model(vmd_data, x_in)
             preds = preds.transpose(1, 3)
             preds_scaled = self.scaler.inverse_transform(preds)
             real_scaled = torch.unsqueeze(y_real, 1)
             loss = self.loss_fn(preds_scaled, real_scaled, 0.0)
+            
+            # Normalize loss for gradient accumulation
+            loss = loss / self.grad_accum_steps
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 5)
-            self.optimizer.step()
+            
+            # Only update weights at the end of accumulation cycle
+            if (accumulation_step + 1) % self.grad_accum_steps == 0:
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 5)
+                self.optimizer.step()
         
-        return loss.item(), metric(preds_scaled, real_scaled)
+        # Return denormalized loss for logging
+        return (loss.item() * self.grad_accum_steps), metric(preds_scaled, real_scaled)
 
     def eval_step(self, x, y_real, vmd_data):
         """

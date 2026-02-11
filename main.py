@@ -67,6 +67,14 @@ def parse_args():
     parser.add_argument('--save_stats', action='store_true',
                         help='Save statistical results to JSON file')
     
+    # Efficiency optimizations
+    parser.add_argument('--grad_accum_steps', type=int, default=1,
+                        help='Gradient accumulation steps for larger effective batch size (default: 1)')
+    parser.add_argument('--val_interval', type=int, default=1,
+                        help='Validate every N epochs (default: 1, set to 5 for faster training)')
+    parser.add_argument('--enable_compile', action='store_true',
+                        help='Enable torch.compile() for ~30%% speedup (PyTorch 2.0+ required)')
+    
     args = parser.parse_args()
     
     # Derived attributes
@@ -118,43 +126,54 @@ def train_single_seed(seed, args, data, adj_mx):
         epoch_loss = []
         epoch_metrics = []
         
+        accumulation_counter = 0
         for x, y, vmd in data['train_loader'].get_iterator():
             tx = torch.Tensor(x).to(args.device).transpose(1, 3)
             ty = torch.Tensor(y).to(args.device).transpose(1, 3)[:, 0, :, :]
             tvmd = torch.Tensor(vmd).to(args.device)
             
-            loss, metrics = trainer.train_step(tx, ty, tvmd)
+            # Pass accumulation step for gradient accumulation
+            loss, metrics = trainer.train_step(tx, ty, tvmd, accumulation_step=accumulation_counter)
+            accumulation_counter += 1
+            
             epoch_loss.append(loss)
             epoch_metrics.append(metrics)
         
         avg_train_loss = np.mean(epoch_loss)
         avg_train_mae = np.mean([m[0] for m in epoch_metrics])
         
-        # Evaluate
-        val_loss = []
-        val_metrics = []
-        
-        for x, y, vmd in data['val_loader'].get_iterator():
-            tx = torch.Tensor(x).to(args.device).transpose(1, 3)
-            ty = torch.Tensor(y).to(args.device).transpose(1, 3)[:, 0, :, :]
-            tvmd = torch.Tensor(vmd).to(args.device)
+        # Validation (only every val_interval epochs)
+        val_interval = getattr(args, 'val_interval', 1)
+        if epoch % val_interval == 0 or epoch == args.epochs:
+            # Evaluate
+            val_loss = []
+            val_metrics = []
             
-            loss, metrics = trainer.eval_step(tx, ty, tvmd)
-            val_loss.append(loss)
-            val_metrics.append(metrics)
-        
-        avg_val_loss = np.mean(val_loss)
-        avg_val_mae = np.mean([m[0] for m in val_metrics])
-        avg_val_rmse = np.mean([m[2] for m in val_metrics])
-        
-        if epoch % 10 == 0 or epoch == 1:
-            print(f"    Epoch {epoch:03d} | Train Loss: {avg_train_loss:.4f} | Val MAE: {avg_val_mae:.4f} | Val RMSE: {avg_val_rmse:.4f}")
-        
-        # Save best model
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
-            best_model_path = os.path.join(seed_log_dir, 'best_model.pth')
-            torch.save(trainer.model.state_dict(), best_model_path)
+            for x, y, vmd in data['val_loader'].get_iterator():
+                tx = torch.Tensor(x).to(args.device).transpose(1, 3)
+                ty = torch.Tensor(y).to(args.device).transpose(1, 3)[:, 0, :, :]
+                tvmd = torch.Tensor(vmd).to(args.device)
+                
+                loss, metrics = trainer.eval_step(tx, ty, tvmd)
+                val_loss.append(loss)
+                val_metrics.append(metrics)
+            
+            avg_val_loss = np.mean(val_loss)
+            avg_val_mae = np.mean([m[0] for m in val_metrics])
+            avg_val_rmse = np.mean([m[2] for m in val_metrics])
+            
+            if epoch % 10 == 0 or epoch == 1:
+                print(f"    Epoch {epoch:03d} | Train Loss: {avg_train_loss:.4f} | Val MAE: {avg_val_mae:.4f} | Val RMSE: {avg_val_rmse:.4f}")
+            
+            # Save best model
+            if avg_val_loss < best_val_loss:
+                best_val_loss = avg_val_loss
+                best_model_path = os.path.join(seed_log_dir, 'best_model.pth')
+                torch.save(trainer.model.state_dict(), best_model_path)
+        else:
+            # Skip validation, just print training status
+            if epoch % 10 == 0:
+                print(f"    Epoch {epoch:03d} | Train Loss: {avg_train_loss:.4f} | Train MAE: {avg_train_mae:.4f} (validation skipped)")
     
     # Test on best model
     best_model_path = os.path.join(seed_log_dir, 'best_model.pth')
