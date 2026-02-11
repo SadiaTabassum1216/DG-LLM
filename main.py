@@ -3,10 +3,13 @@ import os
 import random
 import numpy as np
 import argparse
+import json
 from data_loader import load_dataset_optimized
 from trainer import VMD_Trainer, test_model
 from visualization import visualize_model_predictions, verify_temporal_features, visualize_advanced_diagnostics, visualize_weekly_horizon1
 from utils import load_pickle
+from experiment_utils import seed_everything, run_with_seeds, compute_statistics, save_statistical_results, print_statistical_report
+from evaluate import evaluate_model_statistical, aggregate_multi_seed_results
 
 
 def parse_args():
@@ -56,6 +59,14 @@ def parse_args():
     parser.add_argument('--visualize', action='store_true',
                         help='Generate visualizations after testing')
     
+    # Multi-seed experiments for statistical rigor
+    parser.add_argument('--num_seeds', type=int, default=1,
+                        help='Number of random seeds to run (default: 1)')
+    parser.add_argument('--seed_start', type=int, default=42,
+                        help='Starting seed value for multi-seed experiments (default: 42)')
+    parser.add_argument('--save_stats', action='store_true',
+                        help='Save statistical results to JSON file')
+    
     args = parser.parse_args()
     
     # Derived attributes
@@ -79,27 +90,100 @@ def parse_args():
     return args
 
 
-def seed_everything(seed=42):
-    random.seed(seed)
-    os.environ['PYTHONHASHSEED'] = str(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.backends.cudnn.deterministic = True
+def train_single_seed(seed, args, data, adj_mx):
+    """
+    Train model with a single seed and return test metrics.
+    This function is used by the multi-seed experiment framework.
+    
+    Args:
+        seed: Random seed
+        args: Parsed arguments
+        data: Loaded dataset dictionary
+        adj_mx: Adjacency matrix
+    
+    Returns:
+        Dictionary with test metrics (mae, rmse, mape)
+    """
+    # Seed-specific log directory
+    seed_log_dir = os.path.join(args.log_dir, f"seed_{seed}")
+    os.makedirs(seed_log_dir, exist_ok=True)
+    
+    # Initialize Trainer
+    trainer = VMD_Trainer(args, data['scaler'], adj_mx, args.device)
+    
+    # Training loop
+    best_val_loss = float('inf')
+    for epoch in range(1, args.epochs + 1):
+        # Train
+        epoch_loss = []
+        epoch_metrics = []
+        
+        for x, y, vmd in data['train_loader'].get_iterator():
+            tx = torch.Tensor(x).to(args.device).transpose(1, 3)
+            ty = torch.Tensor(y).to(args.device).transpose(1, 3)[:, 0, :, :]
+            tvmd = torch.Tensor(vmd).to(args.device)
+            
+            loss, metrics = trainer.train_step(tx, ty, tvmd)
+            epoch_loss.append(loss)
+            epoch_metrics.append(metrics)
+        
+        avg_train_loss = np.mean(epoch_loss)
+        avg_train_mae = np.mean([m[0] for m in epoch_metrics])
+        
+        # Evaluate
+        val_loss = []
+        val_metrics = []
+        
+        for x, y, vmd in data['val_loader'].get_iterator():
+            tx = torch.Tensor(x).to(args.device).transpose(1, 3)
+            ty = torch.Tensor(y).to(args.device).transpose(1, 3)[:, 0, :, :]
+            tvmd = torch.Tensor(vmd).to(args.device)
+            
+            loss, metrics = trainer.eval_step(tx, ty, tvmd)
+            val_loss.append(loss)
+            val_metrics.append(metrics)
+        
+        avg_val_loss = np.mean(val_loss)
+        avg_val_mae = np.mean([m[0] for m in val_metrics])
+        avg_val_rmse = np.mean([m[2] for m in val_metrics])
+        
+        if epoch % 10 == 0 or epoch == 1:
+            print(f"    Epoch {epoch:03d} | Train Loss: {avg_train_loss:.4f} | Val MAE: {avg_val_mae:.4f} | Val RMSE: {avg_val_rmse:.4f}")
+        
+        # Save best model
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            best_model_path = os.path.join(seed_log_dir, 'best_model.pth')
+            torch.save(trainer.model.state_dict(), best_model_path)
+    
+    # Test on best model
+    best_model_path = os.path.join(seed_log_dir, 'best_model.pth')
+    test_results = evaluate_model_statistical(
+        trainer,
+        data['test_loader'],
+        args.device,
+        data['scaler'],
+        args.output_len,
+        current_seed=seed
+    )
+    
+    return test_results
 
 
 def main():
     args = parse_args()
-    seed_everything(args.seed)
     
     print(f"{'='*60}")
     print(f"  DG-LLM Training - {args.data}")
     print(f"  Device: {args.device}")
     print(f"  Nodes: {args.num_nodes}")
+    if args.num_seeds > 1:
+        print(f"  Multi-seed mode: {args.num_seeds} seeds")
     print(f"{'='*60}\n")
 
-    # 1. Load Data
+    # 1. Load Data (once, shared across seeds)
     print(">> Loading Dataset...")
+    seed_everything(args.seed_start)  # Use consistent seed for data loading
     data = load_dataset_optimized(args.data_path, args.batch_size, args)
     
     # Sanity check
@@ -120,125 +204,197 @@ def main():
         print(f">> Warning: No adjacency matrix found at {adj_path}. Using identity.")
         adj_mx = np.eye(args.num_nodes)
 
-    # 3. Initialize Trainer
-    print("\n>> Initializing Model...")
-    trainer = VMD_Trainer(args, data['scaler'], adj_mx, args.device)
-    print(f"   Total parameters: {trainer.model.param_num():,}")
-
-    # 4. Check for existing checkpoint
-    latest_ckpt = os.path.join(args.log_dir, 'latest_checkpoint.pth')
-    start_epoch = 1
-    best_val_loss = float('inf')
-    
-    if os.path.exists(latest_ckpt):
-        print(f"\n>> Found existing checkpoint at {latest_ckpt}")
-        start_epoch, best_val_loss = trainer.load_checkpoint(latest_ckpt)
-        start_epoch += 1
-        print(f"   Resuming from epoch {start_epoch}")
-
-
-    # 5. Training Loop (skip if --test_only)
-    if not args.test_only:
-        print(f"\n>> Starting Training from Epoch {start_epoch}...")
-        for epoch in range(start_epoch, args.epochs + 1):
-            # Train
-            epoch_loss = []
-            epoch_metrics = []
+    # 3. Run experiments
+    if args.num_seeds > 1:
+        # Multi-seed experiment mode
+        print(f"\n{'='*70}")
+        print(f"  MULTI-SEED EXPERIMENT MODE")
+        print(f"  Running {args.num_seeds} independent experiments")
+        print(f"{'='*70}")
+        
+        seeds = list(range(args.seed_start, args.seed_start + args.num_seeds))
+        
+        # Run multi-seed experiments
+        all_results = {}
+        for seed_idx, seed in enumerate(seeds, 1):
+            print(f"\n{'─'*70}")
+            print(f"  Experiment {seed_idx}/{args.num_seeds} - Seed: {seed}")
+            print(f"{'─'*70}")
             
-            for x, y, vmd in data['train_loader'].get_iterator():
-                tx = torch.Tensor(x).to(args.device).transpose(1, 3)
-                ty = torch.Tensor(y).to(args.device).transpose(1, 3)[:, 0, :, :]
-                tvmd = torch.Tensor(vmd).to(args.device)
-                
-                loss, metrics = trainer.train_step(tx, ty, tvmd)
-                epoch_loss.append(loss)
-                epoch_metrics.append(metrics)
+            seed_everything(seed)
+            seed_results = train_single_seed(seed, args, data, adj_mx)
             
-            avg_train_loss = np.mean(epoch_loss)
-            avg_train_mae = np.mean([m[0] for m in epoch_metrics])
+            # Accumulate results (both scalars and per-horizon lists)
+            for metric, value in seed_results.items():
+                if isinstance(value, (int, float)):
+                    # Scalar metrics
+                    if metric not in all_results:
+                        all_results[metric] = []
+                    all_results[metric].append(value)
+                elif isinstance(value, list):
+                    # Per-horizon metrics
+                    if metric not in all_results:
+                        all_results[metric] = []
+                    all_results[metric].append(value)
+        
+        # Compute and display overall statistics
+        print(f"\n{'='*70}")
+        print(f"  OVERALL RESULTS ACROSS {args.num_seeds} SEEDS")
+        print(f"{'='*70}")
+        
+        stats = compute_statistics(all_results, confidence_level=0.95)
+        
+        # Print formatted results
+        print(f"\n{'Metric':<15} | {'Mean':<12} | {'Std':<12} | {'95% CI':<25}")
+        print(f"{'-'*70}")
+        for metric in ['mae', 'rmse', 'mape']:
+            if metric in stats:
+                s = stats[metric]
+                ci_str = f"[{s['ci_lower']:.4f}, {s['ci_upper']:.4f}]"
+                print(f"{metric.upper():<15} | {s['mean']:<12.4f} | {s['std']:<12.4f} | {ci_str:<25}")
+        print(f"{'='*70}")
+        
+        # Compute and display per-horizon statistics
+        from horizon_stats import aggregate_per_horizon_metrics, print_per_horizon_statistics, save_per_horizon_statistics
+        
+        horizon_metrics = {k: v for k, v in all_results.items() if k.startswith('horizon_')}
+        if horizon_metrics:
+            horizon_stats = aggregate_per_horizon_metrics(horizon_metrics, confidence_level=0.95)
+            print_per_horizon_statistics(horizon_stats, args.num_seeds)
             
-            # Evaluate
-            val_loss = []
-            val_metrics = []
-            
-            for x, y, vmd in data['val_loader'].get_iterator():
-                tx = torch.Tensor(x).to(args.device).transpose(1, 3)
-                ty = torch.Tensor(y).to(args.device).transpose(1, 3)[:, 0, :, :]
-                tvmd = torch.Tensor(vmd).to(args.device)
-                
-                loss, metrics = trainer.eval_step(tx, ty, tvmd)
-                val_loss.append(loss)
-                val_metrics.append(metrics)
-            
-            avg_val_loss = np.mean(val_loss)
-            avg_val_mae = np.mean([m[0] for m in val_metrics])
-            avg_val_rmse = np.mean([m[2] for m in val_metrics])
-            
-            print(f"Epoch {epoch:03d} | Train Loss: {avg_train_loss:.4f} | Val MAE: {avg_val_mae:.4f} | Val RMSE: {avg_val_rmse:.4f}")
-            
-            # Save checkpoint
-            trainer.save_checkpoint(epoch, avg_val_loss, os.path.join(args.log_dir, 'latest_checkpoint.pth'))
-            
-            if avg_val_loss < best_val_loss:
-                best_val_loss = avg_val_loss
-                torch.save(trainer.model.state_dict(), os.path.join(args.log_dir, 'best_model.pth'))
-                print(f"  >> New Best Model Saved (Val Loss: {avg_val_loss:.4f})")
+            # Save per-horizon stats if requested
+            if args.save_stats:
+                horizon_save_path = os.path.join(args.log_dir, f'{args.data}_horizon_stats.json')
+                save_per_horizon_statistics(horizon_stats, horizon_save_path)
+        
+        
+        # Save statistical results
+        if args.save_stats:
+            stats_path = os.path.join(args.log_dir, f'{args.data}_multiseed_stats.json')
+            save_statistical_results(stats, stats_path, format='json')
+        
     else:
-        print("\n>> Skipping training (--test_only mode)")
+        # Single-seed mode (original behavior)
+        seed_everything(args.seed)
+        
+        print("\n>> Initializing Model...")
+        trainer = VMD_Trainer(args, data['scaler'], adj_mx, args.device)
+        print(f"   Total parameters: {trainer.model.param_num():,}")
 
-    # 7. Testing
-    print("\n" + "="*60)
-    print("  TESTING BEST MODEL")
-    print("="*60)
-    best_model_path = os.path.join(args.log_dir, 'best_model.pth')
-    if os.path.exists(best_model_path):
-        test_model(trainer, data, args.device, best_model_path)
-    else:
-        print("No best model found. Testing with latest checkpoint...")
-        test_model(trainer, data, args.device, latest_ckpt)
+        # Check for existing checkpoint
+        latest_ckpt = os.path.join(args.log_dir, 'latest_checkpoint.pth')
+        start_epoch = 1
+        best_val_loss = float('inf')
+        
+        if os.path.exists(latest_ckpt):
+            print(f"\n>> Found existing checkpoint at {latest_ckpt}")
+            start_epoch, best_val_loss = trainer.load_checkpoint(latest_ckpt)
+            start_epoch += 1
+            print(f"   Resuming from epoch {start_epoch}")
 
-    # 8. Visualization (if --visualize flag is set)
-    if args.visualize:
+        # Training Loop (skip if --test_only)
+        if not args.test_only:
+            print(f"\n>> Starting Training from Epoch {start_epoch}...")
+            for epoch in range(start_epoch, args.epochs + 1):
+                # Train
+                epoch_loss = []
+                epoch_metrics = []
+                
+                for x, y, vmd in data['train_loader'].get_iterator():
+                    tx = torch.Tensor(x).to(args.device).transpose(1, 3)
+                    ty = torch.Tensor(y).to(args.device).transpose(1, 3)[:, 0, :, :]
+                    tvmd = torch.Tensor(vmd).to(args.device)
+                    
+                    loss, metrics = trainer.train_step(tx, ty, tvmd)
+                    epoch_loss.append(loss)
+                    epoch_metrics.append(metrics)
+                
+                avg_train_loss = np.mean(epoch_loss)
+                avg_train_mae = np.mean([m[0] for m in epoch_metrics])
+                
+                # Evaluate
+                val_loss = []
+                val_metrics = []
+                
+                for x, y, vmd in data['val_loader'].get_iterator():
+                    tx = torch.Tensor(x).to(args.device).transpose(1, 3)
+                    ty = torch.Tensor(y).to(args.device).transpose(1, 3)[:, 0, :, :]
+                    tvmd = torch.Tensor(vmd).to(args.device)
+                    
+                    loss, metrics = trainer.eval_step(tx, ty, tvmd)
+                    val_loss.append(loss)
+                    val_metrics.append(metrics)
+                
+                avg_val_loss = np.mean(val_loss)
+                avg_val_mae = np.mean([m[0] for m in val_metrics])
+                avg_val_rmse = np.mean([m[2] for m in val_metrics])
+                
+                print(f"Epoch {epoch:03d} | Train Loss: {avg_train_loss:.4f} | Val MAE: {avg_val_mae:.4f} | Val RMSE: {avg_val_rmse:.4f}")
+                
+                # Save checkpoint
+                trainer.save_checkpoint(epoch, avg_val_loss, os.path.join(args.log_dir, 'latest_checkpoint.pth'))
+                
+                if avg_val_loss < best_val_loss:
+                    best_val_loss = avg_val_loss
+                    torch.save(trainer.model.state_dict(), os.path.join(args.log_dir, 'best_model.pth'))
+                    print(f"  >> New Best Model Saved (Val Loss: {avg_val_loss:.4f})")
+        else:
+            print("\n>> Skipping training (--test_only mode)")
+
+        # Testing
         print("\n" + "="*60)
-        print("  GENERATING VISUALIZATIONS")
+        print("  TESTING BEST MODEL")
         print("="*60)
-        
-        # Load best model for visualization
+        best_model_path = os.path.join(args.log_dir, 'best_model.pth')
         if os.path.exists(best_model_path):
-            trainer.model.load_state_dict(torch.load(best_model_path, weights_only=False))
-        trainer.model.eval()
-        
-        # Collect predictions
-        all_preds = []
-        all_reals = []
-        
-        with torch.no_grad():
-            for x, y, vmd in data['test_loader'].get_iterator():
-                tx = torch.Tensor(x).to(args.device).transpose(1, 3)
-                ty = torch.Tensor(y).to(args.device).transpose(1, 3)[:, 0, :, :]
-                tvmd = torch.Tensor(vmd).to(args.device)
-                x_in = tx.permute(0, 3, 2, 1)  # [B, T, N, F]
-                
-                pred, _ = trainer.model(tvmd, x_in)
-                preds_unscaled = data['scaler'].inverse_transform(pred)
-                reals_unscaled = data['scaler'].inverse_transform(ty.permute(0, 2, 1).unsqueeze(-1))
-                
-                all_preds.append(preds_unscaled)
-                all_reals.append(reals_unscaled)
-        
-        preds = torch.cat(all_preds, dim=0)
-        reals = torch.cat(all_reals, dim=0)
-        
-        print(f"Predictions shape: {preds.shape}")
-        print(f"Reals shape: {reals.shape}")
-        
-        # Generate plots
-        visualize_model_predictions(preds, reals, node_idx=0, horizon_idx=0)
-        visualize_advanced_diagnostics(preds, reals, node_idx=0)
-        visualize_weekly_horizon1(preds, reals, node_idx=0)
-        
-        print("\n>> Visualizations complete!")
+            test_model(trainer, data, args.device, best_model_path)
+        else:
+            print("No best model found. Testing with latest checkpoint...")
+            test_model(trainer, data, args.device, latest_ckpt)
+
+        # Visualization (if --visualize flag is set)
+        if args.visualize:
+            print("\n" + "="*60)
+            print("  GENERATING VISUALIZATIONS")
+            print("="*60)
+            
+            # Load best model for visualization
+            if os.path.exists(best_model_path):
+                trainer.model.load_state_dict(torch.load(best_model_path, weights_only=False))
+            trainer.model.eval()
+            
+            # Collect predictions
+            all_preds = []
+            all_reals = []
+            
+            with torch.no_grad():
+                for x, y, vmd in data['test_loader'].get_iterator():
+                    tx = torch.Tensor(x).to(args.device).transpose(1, 3)
+                    ty = torch.Tensor(y).to(args.device).transpose(1, 3)[:, 0, :, :]
+                    tvmd = torch.Tensor(vmd).to(args.device)
+                    x_in = tx.permute(0, 3, 2, 1)  # [B, T, N, F]
+                    
+                    pred, _ = trainer.model(tvmd, x_in)
+                    preds_unscaled = data['scaler'].inverse_transform(pred)
+                    reals_unscaled = data['scaler'].inverse_transform(ty.permute(0, 2, 1).unsqueeze(-1))
+                    
+                    all_preds.append(preds_unscaled)
+                    all_reals.append(reals_unscaled)
+            
+            preds = torch.cat(all_preds, dim=0)
+            reals = torch.cat(all_reals, dim=0)
+            
+            print(f"Predictions shape: {preds.shape}")
+            print(f"Reals shape: {reals.shape}")
+            
+            # Generate plots
+            visualize_model_predictions(preds, reals, node_idx=0, horizon_idx=0)
+            visualize_advanced_diagnostics(preds, reals, node_idx=0)
+            visualize_weekly_horizon1(preds, reals, node_idx=0)
+            
+            print("\n>> Visualizations complete!")
 
 
 if __name__ == "__main__":
     main()
+

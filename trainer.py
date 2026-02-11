@@ -40,7 +40,6 @@ class VMD_Trainer:
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'best_val_loss': val_loss,
-            'lightweight': self.lightweight,
         }
         torch.save(state, path)
         print(f"--- Checkpoint saved to {path} (Epoch {epoch}) ---")
