@@ -341,34 +341,43 @@ def main():
         else:
             print("\n>> Skipping training (--test_only mode)")
 
-        # Testing
-        print("\n" + "="*60)
-        print("  TESTING BEST MODEL")
-        print("="*60)
+        # Check if model checkpoint exists
         best_model_path = os.path.join(args.log_dir, 'best_model.pth')
+        latest_ckpt = os.path.join(args.log_dir, 'latest_checkpoint.pth')
+        
+        model_path = None
         if os.path.exists(best_model_path):
-            test_model(trainer, data, args.device, best_model_path)
+            model_path = best_model_path
+            print(f"\n✓ Found best model at: {best_model_path}")
+        elif os.path.exists(latest_ckpt):
+            model_path = latest_ckpt
+            print(f"\n✓ Found latest checkpoint at: {latest_ckpt}")
         else:
-            print("No best model found. Testing with latest checkpoint...")
-            test_model(trainer, data, args.device, latest_ckpt)
+            print(f"\n✗ ERROR: No trained model found!")
+            print(f"  Searched for:")
+            print(f"    - {best_model_path}")
+            print(f"    - {latest_ckpt}")
+            print(f"\n  Please train a model first by running without --test_only")
+            return
 
-        # Visualization (if --visualize flag is set)
+        # Load model once
+        print(f"\n>> Loading model from {model_path}...")
+        trainer.model.load_state_dict(torch.load(model_path, weights_only=False))
+        trainer.model.eval()
+
+        # Testing and Visualization (combined to avoid redundant passes)
         if args.visualize:
             print("\n" + "="*60)
-            print("  GENERATING VISUALIZATIONS")
+            print("  TESTING MODEL & GENERATING VISUALIZATIONS")
             print("="*60)
             
-            # Load best model for visualization
-            if os.path.exists(best_model_path):
-                trainer.model.load_state_dict(torch.load(best_model_path, weights_only=False))
-            trainer.model.eval()
-            
-            # Collect predictions
+            # Single pass through test data for both testing and visualization
             all_preds = []
             all_reals = []
             
+            from tqdm import tqdm
             with torch.no_grad():
-                for x, y, vmd in data['test_loader'].get_iterator():
+                for x, y, vmd in tqdm(data['test_loader'].get_iterator(), desc="Evaluating"):
                     tx = torch.Tensor(x).to(args.device).transpose(1, 3)
                     ty = torch.Tensor(y).to(args.device).transpose(1, 3)[:, 0, :, :]
                     tvmd = torch.Tensor(vmd).to(args.device)
@@ -384,15 +393,39 @@ def main():
             preds = torch.cat(all_preds, dim=0)
             reals = torch.cat(all_reals, dim=0)
             
-            print(f"Predictions shape: {preds.shape}")
-            print(f"Reals shape: {reals.shape}")
+            # Compute and print test metrics
+            from utils import MAE_torch, RMSE_torch, MAPE_torch
+            test_mae = MAE_torch(preds, reals, 0).item()
+            test_rmse = RMSE_torch(preds, reals, 0).item()
+            test_mape = MAPE_torch(preds, reals, 0).item()
             
-            # Generate plots
+            print(f"\n{'='*60}")
+            print(f"  TEST RESULTS")
+            print(f"{'='*60}")
+            print(f"  MAE:  {test_mae:.4f}")
+            print(f"  RMSE: {test_rmse:.4f}")
+            print(f"  MAPE: {test_mape:.4f}")
+            print(f"{'='*60}")
+            
+            # Generate visualizations
+            print(f"\n>> Generating visualizations...")
+            print(f"   Predictions shape: {preds.shape}")
+            print(f"   Ground truth shape: {reals.shape}")
+            
             visualize_model_predictions(preds, reals, node_idx=0, horizon_idx=0)
             visualize_advanced_diagnostics(preds, reals, node_idx=0)
             visualize_weekly_horizon1(preds, reals, node_idx=0)
             
-            print("\n>> Visualizations complete!")
+            print("\n✓ Visualizations saved to ./logs/")
+            print("  - predictions_node0_h0.png")
+            print("  - diagnostics_node0.png")
+            print("  - weekly_node0.png")
+        else:
+            # Just testing, no visualization
+            print("\n" + "="*60)
+            print("  TESTING BEST MODEL")
+            print("="*60)
+            test_model(trainer, data, args.device, model_path)
 
 
 if __name__ == "__main__":
