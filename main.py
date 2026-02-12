@@ -121,6 +121,8 @@ def train_single_seed(seed, args, data, adj_mx):
     
     # Training loop
     best_val_loss = float('inf')
+    training_log = {"epochs": [], "train_loss": [], "val_loss": [], "val_mae": [], "best_epoch": 0}
+    
     for epoch in range(1, args.epochs + 1):
         # Train
         epoch_loss = []
@@ -165,15 +167,28 @@ def train_single_seed(seed, args, data, adj_mx):
             if epoch % 10 == 0 or epoch == 1:
                 print(f"    Epoch {epoch:03d} | Train Loss: {avg_train_loss:.4f} | Val MAE: {avg_val_mae:.4f} | Val RMSE: {avg_val_rmse:.4f}")
             
+            # Log training metrics
+            training_log["epochs"].append(epoch)
+            training_log["train_loss"].append(float(avg_train_loss))
+            training_log["val_loss"].append(float(avg_val_loss))
+            training_log["val_mae"].append(float(avg_val_mae))
+            
             # Save best model
             if avg_val_loss < best_val_loss:
                 best_val_loss = avg_val_loss
                 best_model_path = os.path.join(seed_log_dir, 'best_model.pth')
                 torch.save(trainer.model.state_dict(), best_model_path)
+                training_log["best_epoch"] = epoch
         else:
             # Skip validation, just print training status
             if epoch % 10 == 0:
                 print(f"    Epoch {epoch:03d} | Train Loss: {avg_train_loss:.4f} | Train MAE: {avg_train_mae:.4f} (validation skipped)")
+    
+    # Save training log
+    log_path = os.path.join(seed_log_dir, 'training_log.json')
+    with open(log_path, 'w') as f:
+        json.dump(training_log, f, indent=2)
+    print(f"    ✓ Training log saved to: {log_path}")
     
     # Test on best model
     best_model_path = os.path.join(seed_log_dir, 'best_model.pth')
@@ -185,6 +200,15 @@ def train_single_seed(seed, args, data, adj_mx):
         args.output_len,
         current_seed=seed
     )
+    
+    # Save test results
+    results_path = os.path.join(seed_log_dir, 'results.json')
+    results_to_save = {k: float(v) if isinstance(v, (int, float, np.floating)) else v 
+                       for k, v in test_results.items()}
+    results_to_save['seed'] = seed
+    with open(results_path, 'w') as f:
+        json.dump(results_to_save, f, indent=2)
+    print(f"    ✓ Test results saved to: {results_path}")
     
     return test_results
 
@@ -314,6 +338,8 @@ def main():
         # Training Loop (skip if --test_only)
         if not args.test_only:
             print(f"\n>> Starting Training from Epoch {start_epoch}...")
+            training_log = {"epochs": [], "train_loss": [], "val_loss": [], "val_mae": [], "best_epoch": 0}
+            
             for epoch in range(start_epoch, args.epochs + 1):
                 # Train
                 epoch_loss = []
@@ -350,6 +376,12 @@ def main():
                 
                 print(f"Epoch {epoch:03d} | Train Loss: {avg_train_loss:.4f} | Val MAE: {avg_val_mae:.4f} | Val RMSE: {avg_val_rmse:.4f}")
                 
+                # Log training metrics
+                training_log["epochs"].append(epoch)
+                training_log["train_loss"].append(float(avg_train_loss))
+                training_log["val_loss"].append(float(avg_val_loss))
+                training_log["val_mae"].append(float(avg_val_mae))
+                
                 # Save checkpoint
                 trainer.save_checkpoint(epoch, avg_val_loss, os.path.join(args.log_dir, 'latest_checkpoint.pth'))
                 
@@ -357,6 +389,13 @@ def main():
                     best_val_loss = avg_val_loss
                     torch.save(trainer.model.state_dict(), os.path.join(args.log_dir, 'best_model.pth'))
                     print(f"  >> New Best Model Saved (Val Loss: {avg_val_loss:.4f})")
+                    training_log["best_epoch"] = epoch
+            
+            # Save training log
+            log_path = os.path.join(args.log_dir, 'training_log.json')
+            with open(log_path, 'w') as f:
+                json.dump(training_log, f, indent=2)
+            print(f"\n✓ Training log saved to: {log_path}")
         else:
             print("\n>> Skipping training (--test_only mode)")
 
@@ -444,7 +483,24 @@ def main():
             print("\n" + "="*60)
             print("  TESTING BEST MODEL")
             print("="*60)
-            test_model(trainer, data, args.device, model_path)
+            test_results = test_model(trainer, data, args.device, model_path)
+            test_mae = test_results['mae']
+            test_rmse = test_results['rmse']
+            test_mape = test_results['mape']
+        
+        # Save test results to JSON for multi-seed aggregation
+        results_path = os.path.join(args.log_dir, 'results.json')
+        results_to_save = {
+            'mae': test_mae,
+            'rmse': test_rmse,
+            'mape': test_mape,
+            'seed': args.seed,
+            'dataset': args.data,
+            'epochs': args.epochs
+        }
+        with open(results_path, 'w') as f:
+            json.dump(results_to_save, f, indent=2)
+        print(f"\n✓ Results saved to: {results_path}")
 
 
 if __name__ == "__main__":

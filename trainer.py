@@ -36,11 +36,14 @@ class VMD_Trainer:
         if self.grad_accum_steps > 1:
             print(f"  >> Gradient Accumulation: {self.grad_accum_steps} steps (Effective batch = {args.batch_size * self.grad_accum_steps})")
         
-        # FP16 mixed precision - enabled by default on CUDA for 1.5-2x speedup
-        self.use_amp = device.type == 'cuda'
+        # FP16 mixed precision - DISABLED to prevent NaN from overflow
+        # FP16 can cause NaN when gradients/activations exceed ±65,504
+        self.use_amp = False  # Set to True to re-enable (30-40% faster but may cause NaN)
         if self.use_amp:
             self.grad_scaler = torch.amp.GradScaler('cuda')
             print("  >> FP16 Mixed Precision ENABLED")
+        else:
+            print("  >> FP16 Mixed Precision DISABLED (for stability)")
         
         self.log_dir = args.log_dir
         os.makedirs(self.log_dir, exist_ok=True)
@@ -197,3 +200,9 @@ def test_model(trainer, dataloader, device, model_path):
     print("-" * 50)
     print(f"AVERAGE    | {np.mean(total_mae):<10.4f} | {np.mean(total_mape):<10.4f} | {np.mean(total_rmse):<10.4f}")
     print("="*50)
+    
+    return {
+        'mae': float(np.mean(total_mae)),
+        'rmse': float(np.mean(total_rmse)),
+        'mape': float(np.mean(total_mape))
+    }
