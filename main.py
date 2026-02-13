@@ -75,6 +75,9 @@ def parse_args():
     parser.add_argument('--enable_compile', action='store_true',
                         help='Enable torch.compile() for ~30%% speedup (PyTorch 2.0+ required)')
     
+    parser.add_argument('--use_bf16', action='store_true',
+                        help='Enable BF16 mixed precision for faster training (requires Ampere+ GPU)')
+    
     args = parser.parse_args()
     
     # Derived attributes
@@ -130,9 +133,9 @@ def train_single_seed(seed, args, data, adj_mx):
         
         accumulation_counter = 0
         for x, y, vmd in data['train_loader'].get_iterator():
-            tx = torch.Tensor(x).to(args.device).transpose(1, 3)
-            ty = torch.Tensor(y).to(args.device).transpose(1, 3)[:, 0, :, :]
-            tvmd = torch.Tensor(vmd).to(args.device)
+            tx = x.to(args.device, non_blocking=True).transpose(1, 3)
+            ty = y.to(args.device, non_blocking=True).transpose(1, 3)[:, 0, :, :]
+            tvmd = vmd.to(args.device, non_blocking=True)
             
             # Pass accumulation step for gradient accumulation
             loss, metrics = trainer.train_step(tx, ty, tvmd, accumulation_step=accumulation_counter)
@@ -152,9 +155,9 @@ def train_single_seed(seed, args, data, adj_mx):
             val_metrics = []
             
             for x, y, vmd in data['val_loader'].get_iterator():
-                tx = torch.Tensor(x).to(args.device).transpose(1, 3)
-                ty = torch.Tensor(y).to(args.device).transpose(1, 3)[:, 0, :, :]
-                tvmd = torch.Tensor(vmd).to(args.device)
+                tx = x.to(args.device, non_blocking=True).transpose(1, 3)
+                ty = y.to(args.device, non_blocking=True).transpose(1, 3)[:, 0, :, :]
+                tvmd = vmd.to(args.device, non_blocking=True)
                 
                 loss, metrics = trainer.eval_step(tx, ty, tvmd)
                 val_loss.append(loss)
@@ -346,9 +349,9 @@ def main():
                 epoch_metrics = []
                 
                 for x, y, vmd in data['train_loader'].get_iterator():
-                    tx = torch.Tensor(x).to(args.device).transpose(1, 3)
-                    ty = torch.Tensor(y).to(args.device).transpose(1, 3)[:, 0, :, :]
-                    tvmd = torch.Tensor(vmd).to(args.device)
+                    tx = x.to(args.device, non_blocking=True).transpose(1, 3)
+                    ty = y.to(args.device, non_blocking=True).transpose(1, 3)[:, 0, :, :]
+                    tvmd = vmd.to(args.device, non_blocking=True)
                     
                     loss, metrics = trainer.train_step(tx, ty, tvmd)
                     epoch_loss.append(loss)
@@ -362,9 +365,9 @@ def main():
                 val_metrics = []
                 
                 for x, y, vmd in data['val_loader'].get_iterator():
-                    tx = torch.Tensor(x).to(args.device).transpose(1, 3)
-                    ty = torch.Tensor(y).to(args.device).transpose(1, 3)[:, 0, :, :]
-                    tvmd = torch.Tensor(vmd).to(args.device)
+                    tx = x.to(args.device, non_blocking=True).transpose(1, 3)
+                    ty = y.to(args.device, non_blocking=True).transpose(1, 3)[:, 0, :, :]
+                    tvmd = vmd.to(args.device, non_blocking=True)
                     
                     loss, metrics = trainer.eval_step(tx, ty, tvmd)
                     val_loss.append(loss)
@@ -436,9 +439,9 @@ def main():
             from tqdm import tqdm
             with torch.no_grad():
                 for x, y, vmd in tqdm(data['test_loader'].get_iterator(), desc="Evaluating"):
-                    tx = torch.Tensor(x).to(args.device).transpose(1, 3)
-                    ty = torch.Tensor(y).to(args.device).transpose(1, 3)[:, 0, :, :]
-                    tvmd = torch.Tensor(vmd).to(args.device)
+                    tx = x.to(args.device, non_blocking=True).transpose(1, 3)
+                    ty = y.to(args.device, non_blocking=True).transpose(1, 3)[:, 0, :, :]
+                    tvmd = vmd.to(args.device, non_blocking=True)
                     x_in = tx.permute(0, 3, 2, 1)  # [B, T, N, F]
                     
                     pred, _ = trainer.model(tvmd, x_in)

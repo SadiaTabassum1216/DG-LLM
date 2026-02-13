@@ -48,9 +48,9 @@ def evaluate_model_statistical(
     
     with torch.no_grad():
         for x, y, vmd in dataloader.get_iterator():
-            tx = torch.Tensor(x).to(device).transpose(1, 3)
-            ty = torch.Tensor(y).to(device).transpose(1, 3)[:, 0, :, :]
-            tvmd = torch.Tensor(vmd).to(device)
+            tx = x.to(device, non_blocking=True).transpose(1, 3)
+            ty = y.to(device, non_blocking=True).transpose(1, 3)[:, 0, :, :]
+            tvmd = vmd.to(device, non_blocking=True)
             
             x_in = tx.permute(0, 3, 2, 1)  # [B, T, N, F]
             preds, _ = trainer.model(tvmd, x_in)

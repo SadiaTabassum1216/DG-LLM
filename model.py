@@ -117,7 +117,7 @@ class ModeProcessor(nn.Module):
 
     def _temporal_ms_feats(self, history_data):
         B, T, S, Fdim = history_data.shape
-        x = history_data.permute(0, 2, 3, 1).contiguous().view(B * S, Fdim, T)
+        x = history_data.permute(0, 2, 3, 1).reshape(B * S, Fdim, T)
         b1 = F.adaptive_avg_pool1d(F.relu(self.tconv1(x)), 1).squeeze(-1)
         b3 = F.adaptive_avg_pool1d(F.relu(self.tconv3(x)), 1).squeeze(-1)
         b5 = F.adaptive_avg_pool1d(F.relu(self.tconv5(x)), 1).squeeze(-1)
@@ -134,29 +134,34 @@ class ModeProcessor(nn.Module):
         B, S, D = feats.shape
         _, mix_alpha_curr = self._schedule()
 
-        # 1) GAT logits (multi-head) with head-dropout
+        # 1) GAT logits (multi-head) — VECTORIZED over all heads
         h = F.normalize(feats, dim=-1)
         q = self.gat_q(h)
         k = self.gat_k(h)
         qi = q.unsqueeze(2).expand(-1, -1, S, -1)
         kj = k.unsqueeze(1).expand(-1, S, -1, -1)
-        pair = torch.cat([qi, kj], dim=-1)
+        pair = torch.cat([qi, kj], dim=-1)  # [B, S, S, 2D]
 
-        logits_per_head = []
-        H = self.gat_a.size(0)
-        for hidx in range(H):
-            if self.training and self.head_dropout > 0 and torch.rand(()) < self.head_dropout:
-                continue
-            a = self.gat_a[hidx]
-            e = torch.matmul(pair, a).squeeze(-1)
-            e = F.leaky_relu(e, self.leaky_slope)
-            logits_per_head.append(e)
-        if len(logits_per_head) == 0:
-            a = self.gat_a[0]
-            e = F.leaky_relu(torch.matmul(pair, a).squeeze(-1), self.leaky_slope)
-            logits_per_head = [e]
+        # Batched attention: einsum over all H heads at once
+        # gat_a: [H, 2D, 1] → squeeze to [H, 2D]
+        # pair: [B, S, S, 2D]
+        # result: [B, H, S, S]
+        logits_all = torch.einsum('bijd,hd->bhij', pair, self.gat_a.squeeze(-1))
+        logits_all = F.leaky_relu(logits_all, self.leaky_slope)
 
-        logits = torch.stack(logits_per_head, dim=1).mean(dim=1)
+        # Head dropout: mask out entire heads during training
+        if self.training and self.head_dropout > 0:
+            H = logits_all.size(1)
+            head_mask = (torch.rand(H, device=logits_all.device) >= self.head_dropout).float()
+            # Ensure at least one head survives
+            if head_mask.sum() == 0:
+                head_mask[0] = 1.0
+            head_mask = head_mask.view(1, H, 1, 1)
+            logits_all = logits_all * head_mask
+            logits = logits_all.sum(dim=1) / head_mask.sum()
+        else:
+            logits = logits_all.mean(dim=1)
+
         logits = logits / max(self.gat_tau, 1e-6)
         A_prob = torch.softmax(logits, dim=-1)
 

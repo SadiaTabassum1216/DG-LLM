@@ -5,46 +5,39 @@ from utils import StandardScaler
 from vmd_utils import precompute_vmd
 
 class OptimizedDataLoader:
-    """Memory-efficient DataLoader with padding for VMD mode processing."""
+    """Memory-efficient DataLoader with pinned-memory tensors for fast GPU transfer."""
     def __init__(self, data_x, data_y, vmd_data, batch_size, shuffle=False):
-        self.data_x = data_x # [Samples, T, N, F]
-        self.data_y = data_y # [Samples, H, N, 1]
-        self.vmd_data = vmd_data # [Samples, K, T, N, 1]
+        # Pre-convert numpy → tensor once (avoids per-batch conversion overhead)
+        # Pin memory so .to(device, non_blocking=True) can overlap with GPU compute
+        use_pin = torch.cuda.is_available()
+        self.data_x = torch.from_numpy(data_x).float()
+        self.data_y = torch.from_numpy(data_y).float()
+        self.vmd_data = torch.from_numpy(vmd_data).float()
+        if use_pin:
+            self.data_x = self.data_x.pin_memory()
+            self.data_y = self.data_y.pin_memory()
+            self.vmd_data = self.vmd_data.pin_memory()
         self.batch_size = batch_size
         self.shuffle = shuffle
-        self.num_samples = data_x.shape[0]
+        self.num_samples = self.data_x.shape[0]
 
     def __iter__(self):
-        indices = np.arange(self.num_samples)
-        if self.shuffle:
-            np.random.shuffle(indices)
+        indices = torch.randperm(self.num_samples) if self.shuffle else torch.arange(self.num_samples)
         
         for i in range(0, self.num_samples, self.batch_size):
             batch_indices = indices[i : i + self.batch_size]
-            
-            x = torch.from_numpy(self.data_x[batch_indices]).float()
-            y = torch.from_numpy(self.data_y[batch_indices]).float()
-            vmd = torch.from_numpy(self.vmd_data[batch_indices]).float()
-            
-            yield x, y, vmd
+            yield self.data_x[batch_indices], self.data_y[batch_indices], self.vmd_data[batch_indices]
 
     def __len__(self):
         return (self.num_samples + self.batch_size - 1) // self.batch_size
 
     def get_iterator(self):
-        """Returns an iterator that yields numpy arrays (for notebook compatibility)."""
-        indices = np.arange(self.num_samples)
-        if self.shuffle:
-            np.random.shuffle(indices)
+        """Returns an iterator that yields pre-built tensors (pinned for non_blocking transfer)."""
+        indices = torch.randperm(self.num_samples) if self.shuffle else torch.arange(self.num_samples)
         
         for i in range(0, self.num_samples, self.batch_size):
             batch_indices = indices[i : i + self.batch_size]
-            
-            x = self.data_x[batch_indices]
-            y = self.data_y[batch_indices]
-            vmd = self.vmd_data[batch_indices]
-            
-            yield x, y, vmd
+            yield self.data_x[batch_indices], self.data_y[batch_indices], self.vmd_data[batch_indices]
 
 def load_dataset_optimized(dataset_dir, batch_size, args, force_recompute=False):
     """

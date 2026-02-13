@@ -36,14 +36,17 @@ class VMD_Trainer:
         if self.grad_accum_steps > 1:
             print(f"  >> Gradient Accumulation: {self.grad_accum_steps} steps (Effective batch = {args.batch_size * self.grad_accum_steps})")
         
-        # FP16 mixed precision - DISABLED to prevent NaN from overflow
-        # FP16 can cause NaN when gradients/activations exceed ±65,504
-        self.use_amp = False  # Set to True to re-enable (30-40% faster but may cause NaN)
-        if self.use_amp:
+        # Mixed precision options
+        self.use_bf16 = getattr(args, 'use_bf16', False)
+        self.use_amp = False  # FP16 disabled (NaN risk from overflow)
+        
+        if self.use_bf16:
+            print("  >> BF16 Mixed Precision ENABLED (safe, no overflow risk)")
+        elif self.use_amp:
             self.grad_scaler = torch.amp.GradScaler('cuda')
             print("  >> FP16 Mixed Precision ENABLED")
         else:
-            print("  >> FP16 Mixed Precision DISABLED (for stability)")
+            print("  >> Mixed Precision DISABLED")
         
         self.log_dir = args.log_dir
         os.makedirs(self.log_dir, exist_ok=True)
@@ -78,37 +81,36 @@ class VMD_Trainer:
         
         # Only zero gradients at the start of accumulation cycle
         if accumulation_step == 0:
-            self.optimizer.zero_grad()
+            self.optimizer.zero_grad(set_to_none=True)
         
         x_in = x.permute(0, 3, 2, 1)
         
         if self.use_amp:
-            # Mixed precision forward pass
+            # FP16 mixed precision forward pass
             with torch.amp.autocast('cuda'):
                 preds, _ = self.model(vmd_data, x_in)
                 preds = preds.transpose(1, 3)
                 preds_scaled = self.scaler.inverse_transform(preds)
                 real_scaled = torch.unsqueeze(y_real, 1)
                 loss = self.loss_fn(preds_scaled, real_scaled, 0.0)
-                
-                # Normalize loss for gradient accumulation
                 loss = loss / self.grad_accum_steps
             
-            # Scaled backward pass
             self.grad_scaler.scale(loss).backward()
             
-            # Only update weights at the end of accumulation cycle
             if (accumulation_step + 1) % self.grad_accum_steps == 0:
                 self.grad_scaler.unscale_(self.optimizer)
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), 5)
                 self.grad_scaler.step(self.optimizer)
                 self.grad_scaler.update()
         else:
-            preds, _ = self.model(vmd_data, x_in)
-            preds = preds.transpose(1, 3)
-            preds_scaled = self.scaler.inverse_transform(preds)
-            real_scaled = torch.unsqueeze(y_real, 1)
-            loss = self.loss_fn(preds_scaled, real_scaled, 0.0)
+            # BF16 or FP32 forward pass
+            ctx = torch.amp.autocast('cuda', dtype=torch.bfloat16) if self.use_bf16 else torch.cuda.amp.autocast(enabled=False)
+            with ctx:
+                preds, _ = self.model(vmd_data, x_in)
+                preds = preds.transpose(1, 3)
+                preds_scaled = self.scaler.inverse_transform(preds)
+                real_scaled = torch.unsqueeze(y_real, 1)
+                loss = self.loss_fn(preds_scaled, real_scaled, 0.0)
             
             # Normalize loss for gradient accumulation
             loss = loss / self.grad_accum_steps
@@ -130,7 +132,8 @@ class VMD_Trainer:
         self.model.eval()
         x_in = x.permute(0, 3, 2, 1)
         
-        with torch.no_grad():
+        ctx = torch.amp.autocast('cuda', dtype=torch.bfloat16) if self.use_bf16 else torch.cuda.amp.autocast(enabled=False)
+        with torch.no_grad(), ctx:
             preds, _ = self.model(vmd_data, x_in)
             
         preds = preds.transpose(1, 3)
@@ -161,9 +164,9 @@ def test_model(trainer, dataloader, device, model_path):
     print(">> Starting Detailed Horizon Evaluation...")
     
     for x, y, vmd in tqdm(dataloader["test_loader"].get_iterator(), desc="Testing"):
-        tx = torch.Tensor(x).to(device).transpose(1, 3)
-        ty = torch.Tensor(y).to(device).transpose(1, 3)[:, 0, :, :]
-        tvmd = torch.Tensor(vmd).to(device)
+        tx = x.to(device, non_blocking=True).transpose(1, 3)
+        ty = y.to(device, non_blocking=True).transpose(1, 3)[:, 0, :, :]
+        tvmd = vmd.to(device, non_blocking=True)
         
         x_in = tx.permute(0, 3, 2, 1)
         with torch.no_grad():

@@ -58,13 +58,18 @@ class CustomGPT2Attention(GPT2Attention):
         Tk = key.size(-2)
         H = query.size(1)
 
-        # Build causal mask (additive; -inf on future)
-        causal_disallow = torch.triu(
-            torch.ones(Tq, Tk, device=hidden_states.device, dtype=torch.bool),
-            diagonal=1
-        )
-        causal_add = torch.zeros((Tq, Tk), device=hidden_states.device, dtype=query.dtype)
-        causal_add = causal_add.masked_fill(causal_disallow, float("-inf"))
+        # Use cached causal mask (avoid re-allocating every forward call)
+        if not hasattr(self, '_cached_causal_mask') or self._cached_causal_size != (Tq, Tk):
+            causal_disallow = torch.triu(
+                torch.ones(Tq, Tk, device=hidden_states.device, dtype=torch.bool),
+                diagonal=1
+            )
+            causal_add = torch.zeros((Tq, Tk), device=hidden_states.device, dtype=query.dtype)
+            causal_add = causal_add.masked_fill(causal_disallow, float("-inf"))
+            self._cached_causal_mask = causal_add
+            self._cached_causal_size = (Tq, Tk)
+        
+        causal_add = self._cached_causal_mask.to(dtype=query.dtype)
         causal_add = causal_add.view(1, 1, Tq, Tk).expand(bsz, H, Tq, Tk)
 
         # Combine with user-provided attn_bias if present
