@@ -455,7 +455,6 @@ def main():
             all_preds = []
             all_reals = []
             
-            from tqdm import tqdm
             with torch.no_grad():
                 for x, y, vmd in tqdm(data['test_loader'].get_iterator(), desc="Evaluating"):
                     tx = x.to(args.device, non_blocking=True).transpose(1, 3)
