@@ -113,7 +113,7 @@ class VMD_Trainer:
             if self.grad_scaler is not None:
                 self.grad_scaler.unscale_(self.optimizer)
                 # Check for NaN/Inf grads — skip this step if found
-                grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+                grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), 5.0)
                 if torch.isfinite(grad_norm):
                     self.grad_scaler.step(self.optimizer)
                 self.grad_scaler.update()
