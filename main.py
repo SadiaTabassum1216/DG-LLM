@@ -136,8 +136,7 @@ def train_single_seed(seed, args, data, adj_mx):
         epoch_metrics = []
         
         accumulation_counter = 0
-        train_pbar = tqdm(data['train_loader'].get_iterator(), desc=f"  Epoch {epoch:03d} [Train]", leave=False, total=len(data['train_loader']))
-        for x, y, vmd in train_pbar:
+        for x, y, vmd in data['train_loader'].get_iterator():
             tx = x.to(args.device, non_blocking=True).transpose(1, 3)
             ty = y.to(args.device, non_blocking=True).transpose(1, 3)[:, 0, :, :]
             tvmd = vmd.to(args.device, non_blocking=True)
@@ -148,7 +147,6 @@ def train_single_seed(seed, args, data, adj_mx):
             
             epoch_loss.append(loss)
             epoch_metrics.append(metrics)
-            train_pbar.set_postfix(loss=f"{loss:.4f}")
         
         avg_train_loss = np.mean(epoch_loss)
         avg_train_mae = np.mean([m[0] for m in epoch_metrics])
@@ -160,8 +158,7 @@ def train_single_seed(seed, args, data, adj_mx):
             val_loss = []
             val_metrics = []
             
-            val_pbar = tqdm(data['val_loader'].get_iterator(), desc=f"  Epoch {epoch:03d} [Val]  ", leave=False, total=len(data['val_loader']))
-            for x, y, vmd in val_pbar:
+            for x, y, vmd in data['val_loader'].get_iterator():
                 tx = x.to(args.device, non_blocking=True).transpose(1, 3)
                 ty = y.to(args.device, non_blocking=True).transpose(1, 3)[:, 0, :, :]
                 tvmd = vmd.to(args.device, non_blocking=True)
@@ -362,8 +359,7 @@ def main():
                 epoch_loss = []
                 epoch_metrics = []
                 
-                train_pbar = tqdm(data['train_loader'].get_iterator(), desc=f"  Epoch {epoch:03d} [Train]", leave=False, total=len(data['train_loader']))
-                for x, y, vmd in train_pbar:
+                for x, y, vmd in data['train_loader'].get_iterator():
                     tx = x.to(args.device, non_blocking=True).transpose(1, 3)
                     ty = y.to(args.device, non_blocking=True).transpose(1, 3)[:, 0, :, :]
                     tvmd = vmd.to(args.device, non_blocking=True)
@@ -371,7 +367,6 @@ def main():
                     loss, metrics = trainer.train_step(tx, ty, tvmd)
                     epoch_loss.append(loss)
                     epoch_metrics.append(metrics)
-                    train_pbar.set_postfix(loss=f"{loss:.4f}")
                 
                 avg_train_loss = np.mean(epoch_loss)
                 avg_train_mae = np.mean([m[0] for m in epoch_metrics])
@@ -380,8 +375,7 @@ def main():
                 val_loss = []
                 val_metrics = []
                 
-                val_pbar = tqdm(data['val_loader'].get_iterator(), desc=f"  Epoch {epoch:03d} [Val]  ", leave=False, total=len(data['val_loader']))
-                for x, y, vmd in val_pbar:
+                for x, y, vmd in data['val_loader'].get_iterator():
                     tx = x.to(args.device, non_blocking=True).transpose(1, 3)
                     ty = y.to(args.device, non_blocking=True).transpose(1, 3)[:, 0, :, :]
                     tvmd = vmd.to(args.device, non_blocking=True)
