@@ -4,6 +4,8 @@ import random
 import numpy as np
 import argparse
 import json
+import time
+from tqdm import tqdm
 from data_loader import load_dataset_optimized
 from trainer import VMD_Trainer, test_model
 from visualization import visualize_model_predictions, verify_temporal_features, visualize_advanced_diagnostics, visualize_weekly_horizon1
@@ -126,13 +128,16 @@ def train_single_seed(seed, args, data, adj_mx):
     best_val_loss = float('inf')
     training_log = {"epochs": [], "train_loss": [], "val_loss": [], "val_mae": [], "best_epoch": 0}
     
-    for epoch in range(1, args.epochs + 1):
+    epoch_pbar = tqdm(range(1, args.epochs + 1), desc="Training", unit="epoch")
+    for epoch in epoch_pbar:
+        epoch_start = time.time()
         # Train
         epoch_loss = []
         epoch_metrics = []
         
         accumulation_counter = 0
-        for x, y, vmd in data['train_loader'].get_iterator():
+        train_pbar = tqdm(data['train_loader'].get_iterator(), desc=f"  Epoch {epoch:03d} [Train]", leave=False, total=len(data['train_loader']))
+        for x, y, vmd in train_pbar:
             tx = x.to(args.device, non_blocking=True).transpose(1, 3)
             ty = y.to(args.device, non_blocking=True).transpose(1, 3)[:, 0, :, :]
             tvmd = vmd.to(args.device, non_blocking=True)
@@ -143,6 +148,7 @@ def train_single_seed(seed, args, data, adj_mx):
             
             epoch_loss.append(loss)
             epoch_metrics.append(metrics)
+            train_pbar.set_postfix(loss=f"{loss:.4f}")
         
         avg_train_loss = np.mean(epoch_loss)
         avg_train_mae = np.mean([m[0] for m in epoch_metrics])
@@ -154,7 +160,8 @@ def train_single_seed(seed, args, data, adj_mx):
             val_loss = []
             val_metrics = []
             
-            for x, y, vmd in data['val_loader'].get_iterator():
+            val_pbar = tqdm(data['val_loader'].get_iterator(), desc=f"  Epoch {epoch:03d} [Val]  ", leave=False, total=len(data['val_loader']))
+            for x, y, vmd in val_pbar:
                 tx = x.to(args.device, non_blocking=True).transpose(1, 3)
                 ty = y.to(args.device, non_blocking=True).transpose(1, 3)[:, 0, :, :]
                 tvmd = vmd.to(args.device, non_blocking=True)
@@ -167,8 +174,11 @@ def train_single_seed(seed, args, data, adj_mx):
             avg_val_mae = np.mean([m[0] for m in val_metrics])
             avg_val_rmse = np.mean([m[2] for m in val_metrics])
             
+            epoch_time = time.time() - epoch_start
+            epoch_pbar.set_postfix(loss=f"{avg_train_loss:.4f}", val_mae=f"{avg_val_mae:.4f}", time=f"{epoch_time:.1f}s")
+            
             if epoch % 10 == 0 or epoch == 1:
-                print(f"    Epoch {epoch:03d} | Train Loss: {avg_train_loss:.4f} | Val MAE: {avg_val_mae:.4f} | Val RMSE: {avg_val_rmse:.4f}")
+                print(f"    Epoch {epoch:03d} | Train Loss: {avg_train_loss:.4f} | Val MAE: {avg_val_mae:.4f} | Val RMSE: {avg_val_rmse:.4f} | Time: {epoch_time:.1f}s")
             
             # Log training metrics
             training_log["epochs"].append(epoch)
@@ -184,8 +194,10 @@ def train_single_seed(seed, args, data, adj_mx):
                 training_log["best_epoch"] = epoch
         else:
             # Skip validation, just print training status
+            epoch_time = time.time() - epoch_start
+            epoch_pbar.set_postfix(loss=f"{avg_train_loss:.4f}", time=f"{epoch_time:.1f}s")
             if epoch % 10 == 0:
-                print(f"    Epoch {epoch:03d} | Train Loss: {avg_train_loss:.4f} | Train MAE: {avg_train_mae:.4f} (validation skipped)")
+                print(f"    Epoch {epoch:03d} | Train Loss: {avg_train_loss:.4f} | Train MAE: {avg_train_mae:.4f} | Time: {epoch_time:.1f}s (validation skipped)")
     
     # Save training log
     log_path = os.path.join(seed_log_dir, 'training_log.json')
@@ -343,12 +355,15 @@ def main():
             print(f"\n>> Starting Training from Epoch {start_epoch}...")
             training_log = {"epochs": [], "train_loss": [], "val_loss": [], "val_mae": [], "best_epoch": 0}
             
-            for epoch in range(start_epoch, args.epochs + 1):
+            epoch_pbar = tqdm(range(start_epoch, args.epochs + 1), desc="Training", unit="epoch")
+            for epoch in epoch_pbar:
+                epoch_start = time.time()
                 # Train
                 epoch_loss = []
                 epoch_metrics = []
                 
-                for x, y, vmd in data['train_loader'].get_iterator():
+                train_pbar = tqdm(data['train_loader'].get_iterator(), desc=f"  Epoch {epoch:03d} [Train]", leave=False, total=len(data['train_loader']))
+                for x, y, vmd in train_pbar:
                     tx = x.to(args.device, non_blocking=True).transpose(1, 3)
                     ty = y.to(args.device, non_blocking=True).transpose(1, 3)[:, 0, :, :]
                     tvmd = vmd.to(args.device, non_blocking=True)
@@ -356,6 +371,7 @@ def main():
                     loss, metrics = trainer.train_step(tx, ty, tvmd)
                     epoch_loss.append(loss)
                     epoch_metrics.append(metrics)
+                    train_pbar.set_postfix(loss=f"{loss:.4f}")
                 
                 avg_train_loss = np.mean(epoch_loss)
                 avg_train_mae = np.mean([m[0] for m in epoch_metrics])
@@ -364,7 +380,8 @@ def main():
                 val_loss = []
                 val_metrics = []
                 
-                for x, y, vmd in data['val_loader'].get_iterator():
+                val_pbar = tqdm(data['val_loader'].get_iterator(), desc=f"  Epoch {epoch:03d} [Val]  ", leave=False, total=len(data['val_loader']))
+                for x, y, vmd in val_pbar:
                     tx = x.to(args.device, non_blocking=True).transpose(1, 3)
                     ty = y.to(args.device, non_blocking=True).transpose(1, 3)[:, 0, :, :]
                     tvmd = vmd.to(args.device, non_blocking=True)
@@ -377,7 +394,9 @@ def main():
                 avg_val_mae = np.mean([m[0] for m in val_metrics])
                 avg_val_rmse = np.mean([m[2] for m in val_metrics])
                 
-                print(f"Epoch {epoch:03d} | Train Loss: {avg_train_loss:.4f} | Val MAE: {avg_val_mae:.4f} | Val RMSE: {avg_val_rmse:.4f}")
+                epoch_time = time.time() - epoch_start
+                epoch_pbar.set_postfix(loss=f"{avg_train_loss:.4f}", val_mae=f"{avg_val_mae:.4f}", time=f"{epoch_time:.1f}s")
+                print(f"Epoch {epoch:03d} | Train Loss: {avg_train_loss:.4f} | Val MAE: {avg_val_mae:.4f} | Val RMSE: {avg_val_rmse:.4f} | Time: {epoch_time:.1f}s")
                 
                 # Log training metrics
                 training_log["epochs"].append(epoch)
