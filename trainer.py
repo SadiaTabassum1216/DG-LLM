@@ -36,15 +36,20 @@ class VMD_Trainer:
         if self.grad_accum_steps > 1:
             print(f"  >> Gradient Accumulation: {self.grad_accum_steps} steps (Effective batch = {args.batch_size * self.grad_accum_steps})")
         
-        # Mixed precision options
-        self.use_bf16 = getattr(args, 'use_bf16', False)
-        self.use_amp = False  # FP16 disabled (NaN risk from overflow)
+        # Mixed precision — auto-detect best dtype for GPU
+        self.use_amp = getattr(args, 'use_amp', False) or getattr(args, 'use_bf16', False)
+        self.amp_dtype = None
+        self.grad_scaler = None
         
-        if self.use_bf16:
-            print("  >> BF16 Mixed Precision ENABLED (safe, no overflow risk)")
-        elif self.use_amp:
-            self.grad_scaler = torch.amp.GradScaler('cuda')
-            print("  >> FP16 Mixed Precision ENABLED")
+        if self.use_amp and torch.cuda.is_available():
+            cc = torch.cuda.get_device_capability()
+            if cc[0] >= 8:  # Ampere+ (A100, L4, etc.) → BF16, no scaler needed
+                self.amp_dtype = torch.bfloat16
+                print(f"  >> AMP ENABLED: BF16 (GPU compute {cc[0]}.{cc[1]}, no overflow risk)")
+            else:  # Turing/Volta (T4, V100, etc.) → FP16 with GradScaler
+                self.amp_dtype = torch.float16
+                self.grad_scaler = torch.amp.GradScaler('cuda')
+                print(f"  >> AMP ENABLED: FP16 + GradScaler (GPU compute {cc[0]}.{cc[1]})")
         else:
             print("  >> Mixed Precision DISABLED")
         
@@ -85,39 +90,34 @@ class VMD_Trainer:
         
         x_in = x.permute(0, 3, 2, 1)
         
-        if self.use_amp:
-            # FP16 mixed precision forward pass
-            with torch.amp.autocast('cuda'):
-                preds, _ = self.model(vmd_data, x_in)
-                preds = preds.transpose(1, 3)
-                preds_scaled = self.scaler.inverse_transform(preds)
-                real_scaled = torch.unsqueeze(y_real, 1)
-                loss = self.loss_fn(preds_scaled, real_scaled, 0.0)
-                loss = loss / self.grad_accum_steps
-            
+        # Forward pass (with or without AMP)
+        ctx = torch.amp.autocast('cuda', dtype=self.amp_dtype) if self.use_amp else torch.cuda.amp.autocast(enabled=False)
+        with ctx:
+            preds, _ = self.model(vmd_data, x_in)
+            preds = preds.transpose(1, 3)
+            preds_scaled = self.scaler.inverse_transform(preds)
+            real_scaled = torch.unsqueeze(y_real, 1)
+            loss = self.loss_fn(preds_scaled, real_scaled, 0.0)
+        
+        # Normalize loss for gradient accumulation
+        loss = loss / self.grad_accum_steps
+        
+        # Backward pass
+        if self.grad_scaler is not None:
             self.grad_scaler.scale(loss).backward()
-            
-            if (accumulation_step + 1) % self.grad_accum_steps == 0:
-                self.grad_scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 5)
-                self.grad_scaler.step(self.optimizer)
-                self.grad_scaler.update()
         else:
-            # BF16 or FP32 forward pass
-            ctx = torch.amp.autocast('cuda', dtype=torch.bfloat16) if self.use_bf16 else torch.cuda.amp.autocast(enabled=False)
-            with ctx:
-                preds, _ = self.model(vmd_data, x_in)
-                preds = preds.transpose(1, 3)
-                preds_scaled = self.scaler.inverse_transform(preds)
-                real_scaled = torch.unsqueeze(y_real, 1)
-                loss = self.loss_fn(preds_scaled, real_scaled, 0.0)
-            
-            # Normalize loss for gradient accumulation
-            loss = loss / self.grad_accum_steps
             loss.backward()
-            
-            # Only update weights at the end of accumulation cycle
-            if (accumulation_step + 1) % self.grad_accum_steps == 0:
+        
+        # Optimizer step at end of accumulation cycle
+        if (accumulation_step + 1) % self.grad_accum_steps == 0:
+            if self.grad_scaler is not None:
+                self.grad_scaler.unscale_(self.optimizer)
+                # Check for NaN/Inf grads — skip this step if found
+                grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+                if torch.isfinite(grad_norm):
+                    self.grad_scaler.step(self.optimizer)
+                self.grad_scaler.update()
+            else:
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), 5)
                 self.optimizer.step()
         
@@ -132,7 +132,7 @@ class VMD_Trainer:
         self.model.eval()
         x_in = x.permute(0, 3, 2, 1)
         
-        ctx = torch.amp.autocast('cuda', dtype=torch.bfloat16) if self.use_bf16 else torch.cuda.amp.autocast(enabled=False)
+        ctx = torch.amp.autocast('cuda', dtype=self.amp_dtype) if self.use_amp else torch.cuda.amp.autocast(enabled=False)
         with torch.no_grad(), ctx:
             preds, _ = self.model(vmd_data, x_in)
             

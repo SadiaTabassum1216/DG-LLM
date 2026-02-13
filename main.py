@@ -77,8 +77,8 @@ def parse_args():
     parser.add_argument('--enable_compile', action='store_true',
                         help='Enable torch.compile() for ~30%% speedup (PyTorch 2.0+ required)')
     
-    parser.add_argument('--use_bf16', action='store_true',
-                        help='Enable BF16 mixed precision for faster training (requires Ampere+ GPU)')
+    parser.add_argument('--use_amp', '--use_bf16', action='store_true',
+                        help='Enable mixed precision (auto-detects FP16 on T4/Turing, BF16 on Ampere+)')
     
     args = parser.parse_args()
     
