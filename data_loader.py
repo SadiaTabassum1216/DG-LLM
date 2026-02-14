@@ -90,7 +90,7 @@ def load_dataset_optimized(dataset_dir, batch_size, args, force_recompute=False)
 
     # VMD Caching Helper
     def get_or_compute_vmd(split_name, data_input):
-        config_id = f"{args.data}_T{args.input_len}"
+        config_id = f"{args.data}_T{args.input_len}_K{args.vmd_k}"
         filename = f"vmd_{split_name}_{config_id}.npy"
         
         target_path = os.path.join(output_cache_dir, filename)
@@ -103,8 +103,8 @@ def load_dataset_optimized(dataset_dir, batch_size, args, force_recompute=False)
             print(f"  [Local Cache Hit] Loading {split_name} from {target_path}...")
             return np.load(target_path)
         else:
-            print(f"  [Cache Miss] Computing VMD for {split_name}...")
-            vmd_result = precompute_vmd(data_input, vmd_k=3, max_workers=4)
+            print(f"  [Cache Miss] Computing VMD for {split_name} (K={args.vmd_k})...")
+            vmd_result = precompute_vmd(data_input, vmd_k=args.vmd_k, max_workers=4)
             np.save(target_path, vmd_result)
             return vmd_result
 
