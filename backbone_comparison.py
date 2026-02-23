@@ -272,16 +272,20 @@ class RandomEncoderDecoderBackbone(BackboneBase):
     This tests encoder-decoder vs decoder-only architecture without pre-training.
     """
     
-    def __init__(self, device: str, gpt_layers: int = 6, U: int = 1, dropout_rate: float = 0.1):
+    def __init__(self, device: str, gpt_layers: int = 6, U: int = 1, dropout_rate: float = 0.1,
+                 hidden_size: int = 768, ffn_size: int = 3072, num_heads: int = 12):
         super().__init__(device, gpt_layers, dropout_rate)
+        
+        self.hidden_size = hidden_size
+        self.output_size = 768  # Must output 768 to match rest of model
         
         # Create T5 config without loading pre-trained weights
         config = T5Config(
-            d_model=768,  # Match GPT-2 hidden size
-            d_ff=3072,    # Match GPT-2 intermediate size
+            d_model=hidden_size,
+            d_ff=ffn_size,
             num_layers=gpt_layers,
             num_decoder_layers=gpt_layers,
-            num_heads=12,
+            num_heads=num_heads,
             dropout_rate=dropout_rate,
             vocab_size=32128,
         )
@@ -289,27 +293,49 @@ class RandomEncoderDecoderBackbone(BackboneBase):
         # Initialize with random weights (no pre-training)
         self.t5 = T5Model(config)
         
+        # Projection layers if dimensions don't match
+        self.input_proj = nn.Linear(768, hidden_size) if hidden_size != 768 else nn.Identity()
+        self.output_proj = nn.Linear(hidden_size, 768) if hidden_size != 768 else nn.Identity()
+        
         # Make ALL parameters trainable (since no pre-training benefit)
-        for param in self.t5.parameters():
+        for param in self.parameters():
             param.requires_grad = True
     
     def forward(self, x: torch.Tensor, adjacency_matrix: torch.Tensor) -> torch.Tensor:
         """
-        x: [B, T, D] input embeddings
+        x: [B, T, D] input embeddings (D=768)
         For encoder-decoder: use x as both encoder input and decoder input
         """
         B, T, D = x.shape
         
+        # Project input if needed
+        x_proj = self.input_proj(x)
+        
         # Use the same input for both encoder and decoder
         outputs = self.t5(
-            inputs_embeds=x,
-            decoder_inputs_embeds=x,
+            inputs_embeds=x_proj,
+            decoder_inputs_embeds=x_proj,
         )
         
         # Use decoder output (has cross-attention with encoder)
         out = outputs.last_hidden_state
+        
+        # Project back to 768 if needed
+        out = self.output_proj(out)
         out = self.dropout(out)
         return out
+
+
+class RandomEncoderDecoderSmallBackbone(RandomEncoderDecoderBackbone):
+    """
+    Smaller encoder-decoder (512 hidden, ~25M params for 6 layers).
+    Comparable to T5-small architecture.
+    """
+    def __init__(self, device: str, gpt_layers: int = 6, U: int = 1, dropout_rate: float = 0.1):
+        super().__init__(
+            device, gpt_layers, U, dropout_rate,
+            hidden_size=512, ffn_size=2048, num_heads=8
+        )
 
 
 # =============================================================================
@@ -367,6 +393,8 @@ class ModeProcessorWithBackbone(nn.Module):
             self.backbone = RandomTransformerBackbone(device, llm_layer, U)
         elif backbone_type == "enc_dec":
             self.backbone = RandomEncoderDecoderBackbone(device, llm_layer, U)
+        elif backbone_type == "enc_dec_small":
+            self.backbone = RandomEncoderDecoderSmallBackbone(device, llm_layer, U)
         else:
             raise ValueError(f"Unknown backbone type: {backbone_type}")
         
@@ -567,16 +595,31 @@ def run_experiment(args, backbone_type, data, adj_mx, scaler):
     
     optimizer = Ranger(model.parameters(), lr=args.lrate, weight_decay=args.wdecay)
     
-    # Training
+    # Training with epoch-wise tracking
     best_val_metrics = {'mae': float('inf'), 'rmse': float('inf'), 'mape': float('inf')}
     best_epoch = 0
     start_time = time.time()
     
+    # Track epoch-wise metrics
+    epoch_history = {
+        'train_loss': [],
+        'val_mae': [],
+        'val_rmse': [],
+        'val_mape': [],
+        'epochs': []
+    }
+    
     for epoch in range(1, args.epochs + 1):
         train_loss = train_epoch(model, data['train_loader'], optimizer, scaler, device)
+        epoch_history['train_loss'].append(float(train_loss))
+        epoch_history['epochs'].append(epoch)
         
         if epoch % args.val_interval == 0 or epoch == args.epochs:
             val_metrics = evaluate(model, data['val_loader'], scaler, device)
+            
+            epoch_history['val_mae'].append(float(val_metrics['mae']))
+            epoch_history['val_rmse'].append(float(val_metrics['rmse']))
+            epoch_history['val_mape'].append(float(val_metrics['mape']))
             
             if val_metrics['mae'] < best_val_metrics['mae']:
                 best_val_metrics = val_metrics
@@ -602,7 +645,8 @@ def run_experiment(args, backbone_type, data, adj_mx, scaler):
         'test_mae': float(test_metrics['mae']),
         'test_rmse': float(test_metrics['rmse']),
         'test_mape': float(test_metrics['mape']),
-        'train_time_min': float(train_time / 60)
+        'train_time_min': float(train_time / 60),
+        'epoch_history': epoch_history
     }
 
 
@@ -647,8 +691,8 @@ def main():
     parser.add_argument('--val_interval', type=int, default=5)
     parser.add_argument('--quick', action='store_true', help='Quick test with 1 epoch')
     parser.add_argument('--backbones', type=str, nargs='+', 
-                        default=['gpt2', 'bert', 'distilgpt2', 'random', 'enc_dec'],
-                        help='Backbones to compare (gpt2, bert, distilgpt2, random, enc_dec)')
+                        default=['gpt2', 'bert', 'distilgpt2', 'random', 'enc_dec', 'enc_dec_small'],
+                        help='Backbones: gpt2, bert, distilgpt2, random, enc_dec, enc_dec_small')
     
     args = parser.parse_args()
     
