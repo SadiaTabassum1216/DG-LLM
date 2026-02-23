@@ -32,6 +32,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from transformers.models.gpt2.modeling_gpt2 import GPT2Model, GPT2Config
 from transformers.models.bert.modeling_bert import BertModel, BertConfig
+from transformers.models.t5.modeling_t5 import T5Model, T5Config
 from transformers.modeling_outputs import BaseModelOutputWithPastAndCrossAttentions
 from peft import get_peft_model, LoraConfig
 
@@ -264,6 +265,53 @@ class RandomTransformerBackbone(BackboneBase):
         return self.dropout(hidden_states)
 
 
+class RandomEncoderDecoderBackbone(BackboneBase):
+    """
+    Randomly initialized encoder-decoder Transformer (no pre-training).
+    Uses T5 architecture but with random weights.
+    This tests encoder-decoder vs decoder-only architecture without pre-training.
+    """
+    
+    def __init__(self, device: str, gpt_layers: int = 6, U: int = 1, dropout_rate: float = 0.1):
+        super().__init__(device, gpt_layers, dropout_rate)
+        
+        # Create T5 config without loading pre-trained weights
+        config = T5Config(
+            d_model=768,  # Match GPT-2 hidden size
+            d_ff=3072,    # Match GPT-2 intermediate size
+            num_layers=gpt_layers,
+            num_decoder_layers=gpt_layers,
+            num_heads=12,
+            dropout_rate=dropout_rate,
+            vocab_size=32128,
+        )
+        
+        # Initialize with random weights (no pre-training)
+        self.t5 = T5Model(config)
+        
+        # Make ALL parameters trainable (since no pre-training benefit)
+        for param in self.t5.parameters():
+            param.requires_grad = True
+    
+    def forward(self, x: torch.Tensor, adjacency_matrix: torch.Tensor) -> torch.Tensor:
+        """
+        x: [B, T, D] input embeddings
+        For encoder-decoder: use x as both encoder input and decoder input
+        """
+        B, T, D = x.shape
+        
+        # Use the same input for both encoder and decoder
+        outputs = self.t5(
+            inputs_embeds=x,
+            decoder_inputs_embeds=x,
+        )
+        
+        # Use decoder output (has cross-attention with encoder)
+        out = outputs.last_hidden_state
+        out = self.dropout(out)
+        return out
+
+
 # =============================================================================
 # Modified ModeProcessor for backbone experiments
 # =============================================================================
@@ -317,6 +365,8 @@ class ModeProcessorWithBackbone(nn.Module):
             self.backbone = DistilGPT2Backbone(device, llm_layer, U)
         elif backbone_type == "random":
             self.backbone = RandomTransformerBackbone(device, llm_layer, U)
+        elif backbone_type == "enc_dec":
+            self.backbone = RandomEncoderDecoderBackbone(device, llm_layer, U)
         else:
             raise ValueError(f"Unknown backbone type: {backbone_type}")
         
@@ -545,14 +595,14 @@ def run_experiment(args, backbone_type, data, adj_mx, scaler):
     
     return {
         'backbone': backbone_type,
-        'total_params': total_params,
-        'trainable_params': trainable_params,
-        'best_val_mae': best_val_metrics['mae'],
-        'best_epoch': best_epoch,
-        'test_mae': test_metrics['mae'],
-        'test_rmse': test_metrics['rmse'],
-        'test_mape': test_metrics['mape'],
-        'train_time_min': train_time / 60
+        'total_params': int(total_params),
+        'trainable_params': int(trainable_params),
+        'best_val_mae': float(best_val_metrics['mae']),
+        'best_epoch': int(best_epoch),
+        'test_mae': float(test_metrics['mae']),
+        'test_rmse': float(test_metrics['rmse']),
+        'test_mape': float(test_metrics['mape']),
+        'train_time_min': float(train_time / 60)
     }
 
 
@@ -597,8 +647,8 @@ def main():
     parser.add_argument('--val_interval', type=int, default=5)
     parser.add_argument('--quick', action='store_true', help='Quick test with 1 epoch')
     parser.add_argument('--backbones', type=str, nargs='+', 
-                        default=['gpt2', 'bert', 'distilgpt2', 'random'],
-                        help='Backbones to compare')
+                        default=['gpt2', 'bert', 'distilgpt2', 'random', 'enc_dec'],
+                        help='Backbones to compare (gpt2, bert, distilgpt2, random, enc_dec)')
     
     args = parser.parse_args()
     
