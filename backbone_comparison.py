@@ -424,20 +424,21 @@ def train_epoch(model, train_loader, optimizer, scaler, device):
     
     for batch in train_loader:
         x, y, vmd = batch
-        x = x.to(device)
-        y = y.to(device)
+        x = x.to(device)  # [B, T, N, F]
+        y = y.to(device)  # [B, T, N, 1]
         vmd = vmd.to(device)
         
         optimizer.zero_grad()
         
-        # x: [B, T, N, F], vmd: [B, K, T, N, 1]
+        # Transform y: [B, T, N, 1] -> [B, N, T] -> [B, T, N] -> [B, T, N, 1]
+        # This matches the evaluate.py pattern
+        y_transformed = y.transpose(1, 3)[:, 0, :, :].permute(0, 2, 1).unsqueeze(-1)
+        
         # Model output: [B, Out_T, N, 1]
         preds, _ = model(vmd, x)
-        preds = preds.squeeze(-1)  # [B, Out_T, N]
         preds_scaled = scaler.inverse_transform(preds)
-        # y: [B, Out_T, N]
         
-        loss = MAE_torch(preds_scaled, y, 0.0)
+        loss = MAE_torch(preds_scaled, y_transformed, 0.0)
         loss.backward()
         
         torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
@@ -456,18 +457,20 @@ def evaluate(model, data_loader, scaler, device):
     with torch.no_grad():
         for batch in data_loader:
             x, y, vmd = batch
-            x = x.to(device)
-            y = y.to(device)
+            x = x.to(device)  # [B, T, N, F]
+            y = y.to(device)  # [B, T, N, 1]
             vmd = vmd.to(device)
             
-            # x: [B, T, N, F], vmd: [B, K, T, N, 1]
+            # Transform y: [B, T, N, 1] -> [B, N, T] -> [B, T, N] -> [B, T, N, 1]
+            y_transformed = y.transpose(1, 3)[:, 0, :, :].permute(0, 2, 1).unsqueeze(-1)
+            
             # Model output: [B, Out_T, N, 1]
             preds, _ = model(vmd, x)
-            preds = preds.squeeze(-1)  # [B, Out_T, N]
             preds_scaled = scaler.inverse_transform(preds)
             
-            preds_list.append(preds_scaled.cpu().numpy())
-            reals_list.append(y.cpu().numpy())
+            # Squeeze for numpy metrics: [B, T_out, N]
+            preds_list.append(preds_scaled.squeeze(-1).cpu().numpy())
+            reals_list.append(y_transformed.squeeze(-1).cpu().numpy())
     
     import numpy as np
     preds_all = np.concatenate(preds_list, axis=0)
