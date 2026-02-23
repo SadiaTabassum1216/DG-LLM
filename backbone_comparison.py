@@ -430,9 +430,9 @@ def train_epoch(model, train_loader, optimizer, scaler, device):
         
         optimizer.zero_grad()
         
-        x_in = x.permute(0, 3, 2, 1)
-        preds, _ = model(vmd, x_in)
-        preds = preds.transpose(1, 3)
+        # x: [B, T, N, F], vmd: [B, K, T, N, 1]
+        preds, _ = model(vmd, x)
+        preds = preds.transpose(1, 3)  # [B, Out_T, N, 1] -> [B, 1, N, Out_T]
         preds_scaled = scaler.inverse_transform(preds)
         real_scaled = y.unsqueeze(1)
         
@@ -459,9 +459,9 @@ def evaluate(model, data_loader, scaler, device):
             y = y.to(device)
             vmd = vmd.to(device)
             
-            x_in = x.permute(0, 3, 2, 1)
-            preds, _ = model(vmd, x_in)
-            preds = preds.transpose(1, 3)
+            # x: [B, T, N, F], vmd: [B, K, T, N, 1]
+            preds, _ = model(vmd, x)
+            preds = preds.transpose(1, 3)  # [B, Out_T, N, 1] -> [B, 1, N, Out_T]
             preds_scaled = scaler.inverse_transform(preds)
             
             preds_list.append(preds_scaled.squeeze(1).cpu().numpy())
