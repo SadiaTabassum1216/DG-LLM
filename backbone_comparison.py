@@ -431,12 +431,13 @@ def train_epoch(model, train_loader, optimizer, scaler, device):
         optimizer.zero_grad()
         
         # x: [B, T, N, F], vmd: [B, K, T, N, 1]
+        # Model output: [B, Out_T, N, 1]
         preds, _ = model(vmd, x)
-        preds = preds.transpose(1, 3)  # [B, Out_T, N, 1] -> [B, 1, N, Out_T]
+        preds = preds.squeeze(-1)  # [B, Out_T, N]
         preds_scaled = scaler.inverse_transform(preds)
-        real_scaled = y.unsqueeze(1)
+        # y: [B, Out_T, N]
         
-        loss = MAE_torch(preds_scaled, real_scaled, 0.0)
+        loss = MAE_torch(preds_scaled, y, 0.0)
         loss.backward()
         
         torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
@@ -460,11 +461,12 @@ def evaluate(model, data_loader, scaler, device):
             vmd = vmd.to(device)
             
             # x: [B, T, N, F], vmd: [B, K, T, N, 1]
+            # Model output: [B, Out_T, N, 1]
             preds, _ = model(vmd, x)
-            preds = preds.transpose(1, 3)  # [B, Out_T, N, 1] -> [B, 1, N, Out_T]
+            preds = preds.squeeze(-1)  # [B, Out_T, N]
             preds_scaled = scaler.inverse_transform(preds)
             
-            preds_list.append(preds_scaled.squeeze(1).cpu().numpy())
+            preds_list.append(preds_scaled.cpu().numpy())
             reals_list.append(y.cpu().numpy())
     
     import numpy as np
