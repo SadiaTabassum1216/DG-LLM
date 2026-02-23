@@ -635,8 +635,7 @@ def main():
     data = load_dataset_optimized(
         args.data_path, 
         args.batch_size, 
-        vmd_K=args.vmd_k, 
-        dataset_name=args.data
+        args
     )
     scaler = data['scaler']
     
