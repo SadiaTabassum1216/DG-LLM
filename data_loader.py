@@ -4,6 +4,124 @@ import os
 from utils import StandardScaler
 from vmd_utils import precompute_vmd
 
+
+def reconstruct_raw_from_windows(x, y, original_input_len=12, original_output_len=12):
+    """
+    Reconstruct raw time series from overlapping sliding windows (step=1).
+    
+    Args:
+        x: [samples, input_len, N, F] - overlapping windows
+        y: [samples, output_len, N, 1] - target windows
+        original_input_len: original input sequence length
+        original_output_len: original output sequence length
+        
+    Returns:
+        raw: [total_timesteps, N, F] - reconstructed raw data
+    """
+    num_samples = x.shape[0]
+    
+    # First window contributes all its timesteps
+    raw_list = [x[0, t] for t in range(original_input_len)]
+    
+    # Each subsequent window adds 1 new timestep (the last one)
+    for i in range(1, num_samples):
+        raw_list.append(x[i, -1])
+    
+    # Add the output horizon from the last sample
+    for t in range(original_output_len):
+        raw_list.append(y[-1, t])
+    
+    raw = np.stack(raw_list, axis=0)
+    return raw
+
+
+def create_sliding_windows(raw_data, input_len, output_len):
+    """
+    Create sliding window samples from raw time series.
+    
+    Args:
+        raw_data: [total_timesteps, N, F]
+        input_len: desired input sequence length
+        output_len: desired output sequence length
+        
+    Returns:
+        x: [samples, input_len, N, F]
+        y: [samples, output_len, N, 1]
+    """
+    total_len = input_len + output_len
+    num_samples = raw_data.shape[0] - total_len + 1
+    
+    if num_samples <= 0:
+        raise ValueError(
+            f"Insufficient data: {raw_data.shape[0]} timesteps, "
+            f"need at least {total_len} (input={input_len} + output={output_len})"
+        )
+    
+    x_list = []
+    y_list = []
+    
+    for i in range(num_samples):
+        x_list.append(raw_data[i : i + input_len])
+        # Target: only first feature (flow/demand)
+        y_list.append(raw_data[i + input_len : i + total_len, :, 0:1])
+    
+    x = np.stack(x_list, axis=0).astype(np.float32)
+    y = np.stack(y_list, axis=0).astype(np.float32)
+    
+    return x, y
+
+
+def reprocess_with_new_lengths(dataset_dir, args, original_input_len=12, original_output_len=12):
+    """
+    Reconstruct raw data from existing windows and re-create with new lengths.
+    
+    Args:
+        dataset_dir: path to processed data
+        args: arguments with input_len, output_len
+        original_input_len: the input_len used when data was preprocessed
+        original_output_len: the output_len used when data was preprocessed
+        
+    Returns:
+        dict with x_train, y_train, x_val, y_val, x_test, y_test
+    """
+    print(f"\n{'='*60}")
+    print(f"Re-processing data: {original_input_len}->{original_output_len} to {args.input_len}->{args.output_len}")
+    print(f"{'='*60}")
+    
+    # Load existing data
+    splits_raw = {}
+    for split in ["train", "val", "test"]:
+        path = os.path.join(dataset_dir, f"{split}.npz")
+        data = np.load(path)
+        splits_raw[split] = {"x": data["x"], "y": data["y"]}
+        print(f"  Loaded {split}: x={data['x'].shape}, y={data['y'].shape}")
+    
+    # Reconstruct raw data for each split
+    print("\nReconstructing raw time series...")
+    raw_splits = {}
+    for split in ["train", "val", "test"]:
+        raw = reconstruct_raw_from_windows(
+            splits_raw[split]["x"], 
+            splits_raw[split]["y"],
+            original_input_len,
+            original_output_len
+        )
+        raw_splits[split] = raw
+        print(f"  {split}: {raw.shape[0]} timesteps")
+    
+    # Create new windows with desired lengths
+    print(f"\nCreating new windows (input={args.input_len}, output={args.output_len})...")
+    result = {}
+    for split in ["train", "val", "test"]:
+        x, y = create_sliding_windows(raw_splits[split], args.input_len, args.output_len)
+        result[f"x_{split}"] = x
+        result[f"y_{split}"] = y
+        print(f"  {split}: {x.shape[0]} samples")
+    
+    print(f"{'='*60}\n")
+    return result
+
+
 class OptimizedDataLoader:
     """Memory-efficient DataLoader with pinned-memory tensors for fast GPU transfer."""
     def __init__(self, data_x, data_y, vmd_data, batch_size, shuffle=False):
@@ -42,45 +160,96 @@ class OptimizedDataLoader:
 def load_dataset_optimized(dataset_dir, batch_size, args, force_recompute=False):
     """
     Load and preprocess traffic dataset with VMD decomposition.
+    
+    Automatically handles reprocessing if input_len/output_len differ from stored data.
     """
     # Cache directories - generalized for local use
     output_cache_dir = "./vmd_cache"
-    input_cache_dir = f"./vmd_cache_{args.data}" # Can point to a shared cache
+    input_cache_dir = f"./vmd_cache_{args.data}"
     os.makedirs(output_cache_dir, exist_ok=True)
 
     data = {}
-    cumulative_offset = 0 
-
-    for category in ["train", "val", "test"]:
-        path = os.path.join(dataset_dir, category + ".npz")
-        if not os.path.exists(path):
-            print(f"  [Warning] {path} not found. Skipping...")
-            continue
+    cumulative_offset = 0
+    
+    # Check if reprocessing is needed
+    needs_reprocess = False
+    sample_path = os.path.join(dataset_dir, "train.npz")
+    if os.path.exists(sample_path):
+        sample_data = np.load(sample_path)
+        stored_input_len = sample_data["x"].shape[1]
+        stored_output_len = sample_data["y"].shape[1]
+        
+        if stored_input_len != args.input_len or stored_output_len != args.output_len:
+            print(f"\n[Auto-Reprocess] Data has {stored_input_len}->{stored_output_len}, "
+                  f"but requested {args.input_len}->{args.output_len}")
+            needs_reprocess = True
+            original_input_len = stored_input_len
+            original_output_len = stored_output_len
+    
+    # Reprocess if needed
+    if needs_reprocess:
+        reprocessed = reprocess_with_new_lengths(
+            dataset_dir, args, 
+            original_input_len=original_input_len,
+            original_output_len=original_output_len
+        )
+        
+        # Add temporal features to reprocessed data
+        for category in ["train", "val", "test"]:
+            x_raw = reprocessed[f"x_{category}"]
+            y_raw = reprocessed[f"y_{category}"]
             
-        cat_data = np.load(path)
-        x_raw = cat_data["x"]  
-        y_raw = cat_data["y"]
+            if x_raw.shape[-1] < 3:
+                print(f"[{category}] Adding temporal features (offset={cumulative_offset})...")
+                num_samples, T_len, num_nodes, _ = x_raw.shape
+                sample_starts = np.arange(num_samples) + cumulative_offset
+                step_indices = sample_starts[:, None] + np.arange(T_len)[None, :]
 
-        # Temporal Feature Generation
-        if x_raw.shape[-1] < 3:
-            print(f"[{category}] Adding temporal features (offset={cumulative_offset})...")
-            num_samples, T_len, num_nodes, _ = x_raw.shape
-            sample_starts = np.arange(num_samples) + cumulative_offset
-            step_indices = sample_starts[:, None] + np.arange(T_len)[None, :] 
+                time_of_day = (step_indices % 288) / 288.0
+                time_of_day = time_of_day[:, :, None, None]
+                time_of_day = np.tile(time_of_day, (1, 1, num_nodes, 1))
 
-            time_of_day = (step_indices % 288) / 288.0
-            time_of_day = time_of_day[:, :, None, None] 
-            time_of_day = np.tile(time_of_day, (1, 1, num_nodes, 1))
+                day_of_week = (step_indices // 288) % 7
+                day_of_week = day_of_week[:, :, None, None].astype(np.float32)
+                day_of_week = np.tile(day_of_week, (1, 1, num_nodes, 1))
 
-            day_of_week = (step_indices // 288) % 7
-            day_of_week = day_of_week[:, :, None, None].astype(np.float32)
-            day_of_week = np.tile(day_of_week, (1, 1, num_nodes, 1))
+                x_raw = np.concatenate([x_raw[..., 0:1], time_of_day, day_of_week], axis=-1)
+                cumulative_offset += num_samples
+            
+            data[f"x_{category}"] = x_raw
+            data[f"y_{category}"] = y_raw
+    else:
+        # Load normally
+        for category in ["train", "val", "test"]:
+            path = os.path.join(dataset_dir, category + ".npz")
+            if not os.path.exists(path):
+                print(f"  [Warning] {path} not found. Skipping...")
+                continue
 
-            x_raw = np.concatenate([x_raw[..., 0:1], time_of_day, day_of_week], axis=-1)
-            cumulative_offset += num_samples
+            cat_data = np.load(path)
+            x_raw = cat_data["x"]
+            y_raw = cat_data["y"]
 
-        data["x_" + category] = x_raw
-        data["y_" + category] = y_raw
+            # Temporal Feature Generation
+            if x_raw.shape[-1] < 3:
+                print(f"[{category}] Adding temporal features (offset={cumulative_offset})...")
+                num_samples, T_len, num_nodes, _ = x_raw.shape
+                sample_starts = np.arange(num_samples) + cumulative_offset
+                step_indices = sample_starts[:, None] + np.arange(T_len)[None, :] 
+
+                time_of_day = (step_indices % 288) / 288.0
+                time_of_day = time_of_day[:, :, None, None] 
+                time_of_day = np.tile(time_of_day, (1, 1, num_nodes, 1))
+
+                day_of_week = (step_indices // 288) % 7
+                day_of_week = day_of_week[:, :, None, None].astype(np.float32)
+                day_of_week = np.tile(day_of_week, (1, 1, num_nodes, 1))
+
+                x_raw = np.concatenate([x_raw[..., 0:1], time_of_day, day_of_week], axis=-1)
+                cumulative_offset += num_samples
+
+            data["x_" + category] = x_raw
+            data["y_" + category] = y_raw
 
     # Scaling
     scaler = StandardScaler(mean=data["x_train"][..., 0].mean(), std=data["x_train"][..., 0].std())

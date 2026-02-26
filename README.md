@@ -13,7 +13,6 @@ Traffic forecasting is a crucial part of urban planning, and it is critical to u
 - **VMD**: Per-sample decomposition (no data leakage between train/val/test)
 - **Dynamic Graph Learning**: Learned adjacency via multi-head GAT with curriculum learning
 - **GPT-2 Backbone**: Pre-trained LLM adapted for time series with LoRA fine-tuning
-- **Gradient Checkpointing**: Memory-efficient training for large models
 
 ## How to Run
 
@@ -58,16 +57,6 @@ Dataset/
 ├── taxi_drop/              # 266 nodes
 └── taxi_pick/              # 266 nodes
 ```
-
-## Model Components
-
-| Component | Description |
-|-----------|-------------|
-| `DGLLM` | Main model combining K VMD mode branches |
-| `TemporalEmbedding` | Learnable time-of-day/day-of-week embeddings |
-| `ModeProcessor` | Single mode processor with dynamic graph |
-| `PFA` | GPT-2 with LoRA and graph attention |
-
 
 ## Acknowledgements
 
