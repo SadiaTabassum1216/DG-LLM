@@ -16,16 +16,19 @@ def reconstruct_raw_from_windows(x, y, original_input_len=12, original_output_le
         original_output_len: original output sequence length
         
     Returns:
-        raw: [total_timesteps, N, F] - reconstructed raw data
+        raw: [total_timesteps, N, 1] - reconstructed raw data (flow only)
     """
     num_samples = x.shape[0]
     
+    # Use only flow channel (index 0) from x to match y's shape [N, 1]
+    x_flow = x[..., 0:1]  # [samples, input_len, N, 1]
+    
     # First window contributes all its timesteps
-    raw_list = [x[0, t] for t in range(original_input_len)]
+    raw_list = [x_flow[0, t] for t in range(original_input_len)]
     
     # Each subsequent window adds 1 new timestep (the last one)
     for i in range(1, num_samples):
-        raw_list.append(x[i, -1])
+        raw_list.append(x_flow[i, -1])
     
     # Add the output horizon from the last sample
     for t in range(original_output_len):
