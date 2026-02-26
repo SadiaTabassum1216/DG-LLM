@@ -174,10 +174,14 @@ def load_dataset_optimized(dataset_dir, batch_size, args, force_recompute=False)
     # Check if reprocessing is needed
     needs_reprocess = False
     sample_path = os.path.join(dataset_dir, "train.npz")
+    print(f"  Checking stored data at: {sample_path}")
     if os.path.exists(sample_path):
         sample_data = np.load(sample_path)
         stored_input_len = sample_data["x"].shape[1]
         stored_output_len = sample_data["y"].shape[1]
+        print(f"  Stored: x.shape={sample_data['x'].shape}, y.shape={sample_data['y'].shape}")
+        print(f"  Stored input_len={stored_input_len}, output_len={stored_output_len}")
+        print(f"  Requested input_len={args.input_len}, output_len={args.output_len}")
         
         if stored_input_len != args.input_len or stored_output_len != args.output_len:
             print(f"\n[Auto-Reprocess] Data has {stored_input_len}->{stored_output_len}, "
@@ -250,6 +254,19 @@ def load_dataset_optimized(dataset_dir, batch_size, args, force_recompute=False)
 
             data["x_" + category] = x_raw
             data["y_" + category] = y_raw
+
+    # Shape validation - catch input_len mismatches BEFORE they cause cryptic Conv2d errors
+    actual_T = data["x_train"].shape[1]
+    if actual_T != args.input_len:
+        raise ValueError(
+            f"\n[SHAPE MISMATCH] x_train has time dimension T={actual_T}, "
+            f"but args.input_len={args.input_len}.\n"
+            f"The stored data in {dataset_dir}/train.npz likely has a different input_len.\n"
+            f"The model's start_conv expects {args.input_dim}*{args.input_len}={args.input_dim*args.input_len} channels, "
+            f"but data would produce {args.input_dim}*{actual_T}={args.input_dim*actual_T} channels.\n"
+            f"Fix: Delete VM cache and ensure reprocessing triggers, or use --input_len {actual_T}."
+        )
+    print(f"  Data shapes: x_train={data['x_train'].shape}, y_train={data['y_train'].shape}")
 
     # Scaling
     scaler = StandardScaler(mean=data["x_train"][..., 0].mean(), std=data["x_train"][..., 0].std())
