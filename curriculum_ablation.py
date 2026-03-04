@@ -137,16 +137,21 @@ def run_ablation_variant(args, config_name, config, data, adj_mx):
         epoch_losses = []
 
         for x, y, vmd in data['train_loader'].get_iterator():
-            tx = x.to(device, non_blocking=True).transpose(1, 3)
-            ty = y.to(device, non_blocking=True).transpose(1, 3)[:, 0, :, :]
+            tx = x.to(device, non_blocking=True).transpose(1, 3)  # [B, F, N, T]
+            ty = y.to(device, non_blocking=True).transpose(1, 3)[:, 0, :, :]  # [B, N, T]
             tvmd = vmd.to(device, non_blocking=True)
+
+            # Permute to [B, T, N, F] — matching VMD_Trainer.train_step
+            x_in = tx.permute(0, 3, 2, 1)
 
             optimizer.zero_grad()
 
-            preds, adj_list = model(tvmd, tx)
+            preds, adj_list = model(tvmd, x_in)
+            preds = preds.transpose(1, 3)  # Match trainer output shape
             preds = scaler.inverse_transform(preds)
+            real_scaled = torch.unsqueeze(ty, 1)
 
-            loss = MAE_torch(preds, ty, 0.0)
+            loss = MAE_torch(preds, real_scaled, 0.0)
 
             # Check for NaN/Inf
             if torch.isnan(loss) or torch.isinf(loss):
@@ -174,11 +179,14 @@ def run_ablation_variant(args, config_name, config, data, adj_mx):
                     ty = y.to(device, non_blocking=True).transpose(1, 3)[:, 0, :, :]
                     tvmd = vmd.to(device, non_blocking=True)
 
-                    preds, _ = model(tvmd, tx)
+                    x_in = tx.permute(0, 3, 2, 1)
+                    preds, _ = model(tvmd, x_in)
+                    preds = preds.transpose(1, 3)
                     preds = scaler.inverse_transform(preds)
+                    real_scaled = torch.unsqueeze(ty, 1)
 
-                    mae_val = MAE_torch(preds, ty, 0.0).item()
-                    rmse_val = RMSE_torch(preds, ty, 0.0).item()
+                    mae_val = MAE_torch(preds, real_scaled, 0.0).item()
+                    rmse_val = RMSE_torch(preds, real_scaled, 0.0).item()
                     val_maes.append(mae_val)
                     val_rmses.append(rmse_val)
 
@@ -210,12 +218,15 @@ def run_ablation_variant(args, config_name, config, data, adj_mx):
             ty = y.to(device, non_blocking=True).transpose(1, 3)[:, 0, :, :]
             tvmd = vmd.to(device, non_blocking=True)
 
-            preds, _ = model(tvmd, tx)
+            x_in = tx.permute(0, 3, 2, 1)
+            preds, _ = model(tvmd, x_in)
+            preds = preds.transpose(1, 3)
             preds = scaler.inverse_transform(preds)
+            real_scaled = torch.unsqueeze(ty, 1)
 
-            test_maes.append(MAE_torch(preds, ty, 0.0).item())
-            test_rmses.append(RMSE_torch(preds, ty, 0.0).item())
-            test_mapes.append(MAPE_torch(preds, ty, 0.0).item())
+            test_maes.append(MAE_torch(preds, real_scaled, 0.0).item())
+            test_rmses.append(RMSE_torch(preds, real_scaled, 0.0).item())
+            test_mapes.append(MAPE_torch(preds, real_scaled, 0.0).item())
 
     test_mae = np.mean(test_maes)
     test_rmse = np.mean(test_rmses)
