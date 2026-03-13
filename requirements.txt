@@ -1,10 +1,10 @@
-torch
-transformers
-peft
-vmdpy
-tqdm
-numpy
-pandas
-scipy
-matplotlib
-seaborn
+torch 	# MalPack: DANGER
+transformers 	# MalPack: DANGER
+peft 	# MalPack: SAFE
+vmdpy 	# MalPack: SAFE
+tqdm 	# MalPack: DANGER
+numpy 	# MalPack: DANGER
+pandas 	# MalPack: DANGER
+scipy 	# MalPack: DANGER
+matplotlib 	# MalPack: DANGER
+seaborn 	# MalPack: SAFE

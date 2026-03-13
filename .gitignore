@@ -1,9 +1,10 @@
-log
-vmd_cache
-.venv/
+venv
 __pycache__
 Dataset
-test_logs
+Dataset_missing
+models
+Dataset_missing
+
 analysis_tools
 rebuttal_figures
 results
