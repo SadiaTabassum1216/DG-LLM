@@ -266,8 +266,16 @@ def main() -> None:
             print(f"  [Cache Miss] Computing VMD for {rate*100}% missing data...")
             vmd_missing = precompute_vmd(x_missing, vmd_k=args.vmd_k, max_workers=args.vmd_workers)
             # Save for future runs
-            os.makedirs(args.vmd_cache_dir, exist_ok=True)
-            np.save(missing_vmd_path, vmd_missing)
+            try:
+                os.makedirs(args.vmd_cache_dir, exist_ok=True)
+                np.save(missing_vmd_path, vmd_missing)
+            except OSError:
+                # Fallback for read-only systems like Kaggle /kaggle/input/
+                fallback_dir = os.path.join(".", "vmd_cache_fallback", args.data)
+                os.makedirs(fallback_dir, exist_ok=True)
+                fallback_path = os.path.join(fallback_dir, missing_vmd_filename)
+                np.save(fallback_path, vmd_missing)
+                print(f"  [Warning] Cache dir read-only. Saved missing VMD to {fallback_path}")
             
         test_loader = OptimizedDataLoader(x_missing, y_test, vmd_missing, args.batch_size, shuffle=False)
 
