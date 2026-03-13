@@ -166,9 +166,9 @@ def load_dataset_optimized(dataset_dir, batch_size, args, force_recompute=False)
     
     Automatically handles reprocessing if input_len/output_len differ from stored data.
     """
-    # Cache directories - generalized for local use
-    output_cache_dir = "./vmd_cache"
-    input_cache_dir = f"./vmd_cache_{args.data}"
+    # Cache directories - respect explicit args if provided
+    output_cache_dir = getattr(args, "vmd_cache_dir", "./vmd_cache")
+    input_cache_dir = getattr(args, "vmd_cache_dir", f"./vmd_cache_{args.data}")
     os.makedirs(output_cache_dir, exist_ok=True)
 
     data = {}
