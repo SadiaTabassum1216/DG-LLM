@@ -36,6 +36,8 @@ def parse_args() -> argparse.Namespace:
                         help="Path to trained model checkpoint (defaults to ./models/<dataset>/best_model.pth)")
     parser.add_argument("--output_json", type=str, default="",
                         help="Output JSON path")
+    parser.add_argument("--vmd_cache_dir", type=str, default="",
+                        help="Path to VMD cache directory (defaults to ./models/<dataset>/vmd_cache)")
 
     parser.add_argument("--rates", type=float, nargs="+", default=[0.1, 0.2, 0.3, 0.5],
                         help="Missing rates in [0, 1]")
@@ -82,7 +84,8 @@ def parse_args() -> argparse.Namespace:
 
     if not args.model_path:
         args.model_path = os.path.join(args.root_path, "..", "models", args.data, "best_model.pth")
-    args.vmd_cache_dir = os.path.join(args.root_path, "..", "models", args.data, "vmd_cache")
+    if not args.vmd_cache_dir:
+        args.vmd_cache_dir = os.path.join(args.root_path, "..", "models", args.data, "vmd_cache")
 
     if not args.output_json:
         args.output_json = f"./results/missing_test_{args.data}.json"
