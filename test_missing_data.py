@@ -10,6 +10,7 @@ This script:
 import argparse
 import json
 import os
+import re
 from datetime import datetime
 from typing import Any, Dict, List, Tuple
 
@@ -25,6 +26,56 @@ from vmd_utils import precompute_vmd
 
 
 DATASETS = ["PEMSD04", "PEMSD08", "bike_drop", "bike_pick", "taxi_drop", "taxi_pick"]
+
+
+def _rate_tag(rate: float) -> str:
+    return f"r{int(round(rate * 100))}"
+
+
+def resolve_dataset_root(args: argparse.Namespace) -> Tuple[str, str]:
+    """Resolve dataset location for both clean and Dataset_missing folder layouts.
+
+    Returns:
+        (dataset_dir, layout)
+        layout is one of: "clean", "missing_variant"
+    """
+    # Standard clean layout: <root>/<dataset>/processed
+    clean_dir = os.path.join(args.root_path, args.data)
+    clean_processed = os.path.join(clean_dir, "processed")
+    if os.path.exists(os.path.join(clean_processed, "train.npz")):
+        return clean_dir, "clean"
+
+    # Dataset_missing layout: <root>/<pattern>_rXX/<dataset>/processed
+    preferred_variants = [
+        f"{args.pattern}_{_rate_tag(r)}"
+        for r in sorted(set(args.rates))
+    ]
+
+    for variant in preferred_variants:
+        cand_dir = os.path.join(args.root_path, variant, args.data)
+        cand_train = os.path.join(cand_dir, "processed", "train.npz")
+        if os.path.exists(cand_train):
+            return cand_dir, "missing_variant"
+
+    # Fallback: pick any pattern-compatible variant under root
+    variant_re = re.compile(rf"^{re.escape(args.pattern)}_r\d+$")
+    try:
+        children = sorted(os.listdir(args.root_path))
+    except OSError:
+        children = []
+
+    for child in children:
+        if not variant_re.match(child):
+            continue
+        cand_dir = os.path.join(args.root_path, child, args.data)
+        cand_train = os.path.join(cand_dir, "processed", "train.npz")
+        if os.path.exists(cand_train):
+            return cand_dir, "missing_variant"
+
+    raise FileNotFoundError(
+        "Could not resolve dataset directory. Checked clean layout "
+        f"'{clean_processed}' and missing-layout candidates under '{args.root_path}'."
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -67,7 +118,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--use_amp", action="store_true")
 
     args = parser.parse_args()
-    args.data_path = os.path.join(args.root_path, args.data, "processed")
+    args.data_dir, args.dataset_layout = resolve_dataset_root(args)
+    args.data_path = os.path.join(args.data_dir, "processed")
 
     if "PEMSD04" in args.data:
         args.num_nodes = 307
@@ -108,7 +160,7 @@ def check_dataset_and_model(args: argparse.Namespace) -> None:
 
 
 def load_adjacency(args: argparse.Namespace) -> np.ndarray:
-    adj_path = os.path.join(args.root_path, args.data, "adj_mx.pkl")
+    adj_path = os.path.join(args.data_dir, "adj_mx.pkl")
     if not os.path.exists(adj_path):
         print(f"[Warning] Adjacency not found at {adj_path}, using identity.")
         return np.eye(args.num_nodes, dtype=np.float32)
@@ -202,11 +254,16 @@ def main() -> None:
     print("DG-LLM Missing-Data Testing")
     print("=" * 70)
     print(f"Dataset   : {args.data}")
+    print(f"Data dir  : {args.data_path}")
+    print(f"Layout    : {args.dataset_layout}")
     print(f"Model     : {args.model_path}")
     print(f"Device    : {args.device}")
     print(f"Pattern   : {args.pattern}")
     print(f"Fill      : {args.fill_method}")
     print(f"Rates     : {args.rates}")
+    if args.dataset_layout == "missing_variant" and args.include_clean:
+        print("[Warning] include_clean requested, but source data is from Dataset_missing variant.")
+        print("          The 0% evaluation will run on that source split, not original clean data.")
 
     print("\n[1/4] Loading dataset...")
     data = load_dataset_optimized(args.data_path, args.batch_size, args)

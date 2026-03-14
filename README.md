@@ -33,6 +33,31 @@ Traffic forecasting is a crucial part of urban planning, and it is critical to u
    python main.py
    ```
 
+### Run Different Input-Output Horizons
+
+DG-LLM supports arbitrary input/output sequence lengths through `--input_len` and `--output_len`.
+
+- 12-12 (default):
+   ```bash
+   python main.py --data PEMSD04 --input_len 12 --output_len 12
+   ```
+
+- 48-48:
+   ```bash
+   python main.py --data PEMSD04 --input_len 48 --output_len 48
+   ```
+
+- 96-96:
+   ```bash
+   python main.py --data PEMSD04 --input_len 96 --output_len 96
+   ```
+
+You can also run multiple horizons in one command with the helper script:
+
+```bash
+python run_statistical_experiment.py --mode multi --dataset PEMSD04 --num_seeds 5 --horizon_pairs 12:12 48:48 96:96
+```
+
 ## Dataset Download
 
 The datasets are available on Google Drive: **[Datasets](https://drive.google.com/file/d/19LkZXBCS7E2SCuM2ZQ7YKT7L0-wMXrJa/view?usp=sharing)**
