@@ -487,9 +487,6 @@ def plot_dynamic_graph_snapshots(graphs_np, graph_nodes, graph_snapshots, output
         r, c = divmod(j, ncols)
         axes[r, c].axis("off")
 
-    if im is not None:
-        fig.colorbar(im, ax=axes.ravel().tolist(), fraction=0.018, pad=0.02, label="Adjacency Value")
-
     fig.suptitle("Dynamic Adjacency Snapshots (3 per row)", y=0.995)
 
     fig.tight_layout()
