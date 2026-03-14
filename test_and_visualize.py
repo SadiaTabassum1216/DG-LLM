@@ -196,7 +196,8 @@ def run_test_inference(trainer, data, args):
             pred, graphs = trainer.model(tvmd, x_in)
 
             pred_unscaled = scaler.inverse_transform(pred).cpu()
-            real_unscaled = scaler.inverse_transform(ty.permute(0, 2, 1).unsqueeze(-1)).cpu()
+            # y is NOT scaled in the dataloader (only x is) — no inverse_transform needed
+            real_unscaled = ty.permute(0, 2, 1).unsqueeze(-1).cpu()
 
             all_preds.append(pred_unscaled)
             all_reals.append(real_unscaled)
