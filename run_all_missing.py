@@ -6,7 +6,7 @@ import time
 
 
 # DATASETS = ["taxi_drop", "taxi_pick", "bike_drop", "bike_pick", "PEMSD04", "PEMSD08"]
-DATASETS = ["PEMSD04", "PEMSD08"]
+DATASETS = ["PEMSD08", "PEMSD04"]
 
 
 def parse_args() -> argparse.Namespace:
