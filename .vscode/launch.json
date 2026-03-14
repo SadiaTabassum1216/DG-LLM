@@ -1,0 +1,18 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "DG-LLM: Test + Visualize",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/test_and_visualize.py",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "args": [
+        "--data",
+        "PEMSD04",
+        "--save_graph_gif"
+      ]
+    }
+  ]
+}
