@@ -293,6 +293,15 @@ def main() -> None:
             "actual_missing_rate": float(actual),
             "results": results,
         })
+        
+        # Free up space by deleting the read-only fallback cache on Kaggle once evaluation finishes for this rate
+        try:
+            fallback_path = os.path.join(".", "vmd_cache_fallback", args.data, missing_vmd_filename)
+            if os.path.exists(fallback_path):
+                os.remove(fallback_path)
+                print(f"  [Info] Deleted fallback VMD cache to free space: {fallback_path}")
+        except Exception as e:
+            print(f"  [Warning] Could not delete fallback cache: {e}")
 
     payload = {
         "timestamp": datetime.utcnow().isoformat() + "Z",
