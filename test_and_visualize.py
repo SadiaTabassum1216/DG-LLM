@@ -118,6 +118,11 @@ def parse_args():
         action="store_true",
         help="Save dynamic adjacency GIF over test batches",
     )
+    parser.add_argument(
+        "--skip_regime_comparison",
+        action="store_true",
+        help="Skip curriculum vs pure_dynamic vs pure_static graph comparison plots",
+    )
 
     args = parser.parse_args()
     args.num_nodes = DATASET_NUM_NODES[args.data]
@@ -180,6 +185,7 @@ def run_test_inference(trainer, data, args):
     all_tod_idx = []
     all_dow_idx = []
     graph_series = []
+    mode_graph_series = [[] for _ in range(args.vmd_k)]
     mode_h1_global = [[] for _ in range(args.vmd_k)]
     mode_h1_node = [[] for _ in range(args.vmd_k)]
     mode_graph_density = [[] for _ in range(args.vmd_k)]
@@ -226,7 +232,10 @@ def run_test_inference(trainer, data, args):
                 graph_series.append(g.numpy())
 
                 for k, gk in enumerate(graphs):
-                    gk_bin = (gk.detach().cpu().numpy() >= 0.5).astype(np.float32)
+                    gk_np = gk.detach().cpu().numpy().astype(np.float32)
+                    mode_graph_series[k].append(gk_np)
+
+                    gk_bin = (gk_np >= 0.5).astype(np.float32)
                     np.fill_diagonal(gk_bin, 0.0)
                     N = gk_bin.shape[0]
                     density = float(gk_bin.sum() / max(N * (N - 1), 1))
@@ -237,6 +246,7 @@ def run_test_inference(trainer, data, args):
     tod_idx = np.concatenate(all_tod_idx, axis=0)
     dow_idx = np.concatenate(all_dow_idx, axis=0)
     graphs = np.stack(graph_series, axis=0) if graph_series else None
+    mode_graphs = [np.stack(v, axis=0) if len(v) > 0 else np.array([]) for v in mode_graph_series]
     mode_h1_global = [np.concatenate(v, axis=0) if len(v) > 0 else np.array([]) for v in mode_h1_global]
     mode_h1_node = [np.concatenate(v, axis=0) if len(v) > 0 else np.array([]) for v in mode_h1_node]
     mode_graph_density = [np.array(v, dtype=np.float32) for v in mode_graph_density]
@@ -247,6 +257,7 @@ def run_test_inference(trainer, data, args):
         "tod_idx": tod_idx,
         "dow_idx": dow_idx,
         "graphs": graphs,
+        "mode_graphs": mode_graphs,
         "mode_h1_global": mode_h1_global,
         "mode_h1_node": mode_h1_node,
         "mode_graph_density": mode_graph_density,
@@ -598,6 +609,228 @@ def save_dynamic_graph_gif(graphs_np, graph_nodes, output_dir):
     return path
 
 
+def _snapshot_modeprocessor_defaults(trainer):
+    defaults = []
+    for mp in trainer.model.mode_models:
+        defaults.append(
+            {
+                "use_dynamic_graph": bool(mp.use_dynamic_graph),
+                "mix_hi": float(mp.mix_hi),
+                "mix_lo": float(mp.mix_lo),
+            }
+        )
+    return defaults
+
+
+def _restore_modeprocessor_defaults(trainer, defaults):
+    for mp, d in zip(trainer.model.mode_models, defaults):
+        mp.use_dynamic_graph = d["use_dynamic_graph"]
+        mp.mix_hi = d["mix_hi"]
+        mp.mix_lo = d["mix_lo"]
+
+
+def _reset_graph_buffers(trainer):
+    for mp in trainer.model.mode_models:
+        mp.global_step.zero_()
+        mp.ema_A.zero_()
+        mp.prev_A.zero_()
+
+
+def _apply_graph_regime(trainer, regime):
+    for mp in trainer.model.mode_models:
+        if regime == "curriculum":
+            mp.use_dynamic_graph = True
+            mp.mix_hi = 0.6
+            mp.mix_lo = 0.2
+        elif regime == "pure_dynamic":
+            mp.use_dynamic_graph = True
+            mp.mix_hi = 0.0
+            mp.mix_lo = 0.0
+        elif regime == "pure_static":
+            mp.use_dynamic_graph = True
+            mp.mix_hi = 1.0
+            mp.mix_lo = 1.0
+        else:
+            raise ValueError(f"Unknown regime: {regime}")
+
+
+def collect_regime_graph_series(trainer, data, args, regime):
+    _apply_graph_regime(trainer, regime)
+    _reset_graph_buffers(trainer)
+
+    graph_series = []
+    trainer.model.eval()
+    with torch.no_grad():
+        for batch_i, (x, _y, vmd) in enumerate(data["test_loader"].get_iterator()):
+            if batch_i >= args.max_graph_batches:
+                break
+
+            tx = x.to(args.device, non_blocking=True).transpose(1, 3)
+            tvmd = vmd.to(args.device, non_blocking=True)
+            x_in = tx.permute(0, 3, 2, 1)
+
+            _pred, graphs = trainer.model(tvmd, x_in)
+            g = torch.stack([gg.detach().cpu() for gg in graphs], dim=0).float().mean(dim=0)
+            graph_series.append((g.numpy() >= 0.5).astype(np.float32))
+
+    if len(graph_series) == 0:
+        return np.array([])
+    return np.stack(graph_series, axis=0)
+
+
+def plot_graph_regime_density(regime_graphs, output_dir):
+    fig, ax = plt.subplots(1, 1, figsize=(14, 4.8))
+    colors = {
+        "curriculum": "#1f77b4",
+        "pure_dynamic": "#d62728",
+        "pure_static": "#2ca02c",
+    }
+    labels = {
+        "curriculum": "Curriculum",
+        "pure_dynamic": "Pure Dynamic",
+        "pure_static": "Pure Static",
+    }
+
+    for regime, g in regime_graphs.items():
+        if g.size == 0:
+            continue
+        density = []
+        for t in range(len(g)):
+            gt = g[t].copy()
+            np.fill_diagonal(gt, 0.0)
+            N = gt.shape[0]
+            density.append(float(gt.sum() / max(N * (N - 1), 1)))
+        ax.plot(density, linewidth=2.0, color=colors.get(regime, None), label=labels.get(regime, regime))
+
+    ax.set_title("Curriculum vs Pure Dynamic vs Pure Static: Graph Density")
+    ax.set_xlabel("Test Batch Index")
+    ax.set_ylabel("Edge Density")
+    ax.grid(alpha=0.25)
+    ax.legend()
+
+    fig.tight_layout()
+    path = os.path.join(output_dir, "regime_graph_density_comparison.png")
+    fig.savefig(path, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+    return path
+
+
+def plot_graph_regime_snapshots(regime_graphs, graph_nodes, output_dir):
+    ordered = ["curriculum", "pure_dynamic", "pure_static"]
+    available = [k for k in ordered if k in regime_graphs and regime_graphs[k].size > 0]
+    if not available:
+        return None
+
+    nrows = len(available)
+    ncols = 3
+    fig, axes = plt.subplots(nrows, ncols, figsize=(4.2 * ncols, 4.2 * nrows), squeeze=False)
+
+    for r, regime in enumerate(available):
+        g = regime_graphs[regime]
+        total = len(g)
+        picks = np.linspace(0, total - 1, num=ncols, dtype=int)
+        nodes_eff = min(graph_nodes, g.shape[1])
+
+        for c, idx in enumerate(picks):
+            ax = axes[r, c]
+            ax.imshow(g[idx, :nodes_eff, :nodes_eff], cmap="Blues", vmin=0.0, vmax=1.0, interpolation="nearest")
+            title_prefix = {
+                "curriculum": "Curriculum",
+                "pure_dynamic": "Pure Dynamic",
+                "pure_static": "Pure Static",
+            }.get(regime, regime)
+            ax.set_title(f"{title_prefix} | Batch {idx}")
+            ax.set_xlabel("Node Index")
+            ax.set_ylabel("Node Index")
+            ax.set_aspect("equal", adjustable="box")
+            if hasattr(ax, "set_box_aspect"):
+                ax.set_box_aspect(1)
+
+    fig.suptitle("Static vs Dynamic vs Curriculum: Intermediate Dynamic Graph Snapshots", y=0.995)
+    fig.tight_layout()
+    path = os.path.join(output_dir, "regime_graph_snapshots_comparison.png")
+    fig.savefig(path, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+    return path
+
+
+def plot_modewise_dynamic_graph_snapshots(mode_graphs, graph_nodes, graph_snapshots, output_dir):
+    if not mode_graphs or len(mode_graphs) == 0 or len(mode_graphs[0]) == 0:
+        return None
+
+    num_modes = len(mode_graphs)
+    total = len(mode_graphs[0])
+    graph_nodes = min(graph_nodes, mode_graphs[0].shape[1])
+    ncols = min(graph_snapshots, total)
+    picks = np.linspace(0, total - 1, num=ncols, dtype=int)
+
+    fig, axes = plt.subplots(num_modes, ncols, figsize=(3.7 * ncols, 3.7 * num_modes), squeeze=False)
+
+    for m in range(num_modes):
+        for c, idx in enumerate(picks):
+            ax = axes[m, c]
+            g = (mode_graphs[m][idx, :graph_nodes, :graph_nodes] >= 0.5).astype(np.float32)
+            ax.imshow(g, cmap="Blues", vmin=0.0, vmax=1.0, interpolation="nearest")
+            if m == 0:
+                ax.set_title(f"Batch {idx}")
+            if c == 0:
+                ax.set_ylabel(f"Mode {m+1}\nNode Index")
+            else:
+                ax.set_ylabel("Node Index")
+            ax.set_xlabel("Node Index")
+            ax.set_aspect("equal", adjustable="box")
+            if hasattr(ax, "set_box_aspect"):
+                ax.set_box_aspect(1)
+
+    fig.suptitle("Mode-wise Dynamic Adjacency Snapshots (Intermediate Batches)", y=0.995)
+    fig.tight_layout()
+
+    path = os.path.join(output_dir, "modewise_dynamic_graph_snapshots.png")
+    fig.savefig(path, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+    return path
+
+
+def save_modewise_dynamic_graph_gifs(mode_graphs, graph_nodes, output_dir):
+    gif_paths = []
+    for m, g in enumerate(mode_graphs):
+        if len(g) < 2:
+            continue
+
+        try:
+            from matplotlib.animation import FuncAnimation, PillowWriter
+        except Exception as ex:
+            print(f"[Warning] GIF export skipped for mode {m+1}: {ex}")
+            continue
+
+        graph_nodes_eff = min(graph_nodes, g.shape[1])
+        anim_data = (g[:, :graph_nodes_eff, :graph_nodes_eff] >= 0.5).astype(np.float32)
+
+        fig, ax = plt.subplots(figsize=(6.5, 6.0))
+        im = ax.imshow(anim_data[0], cmap="Blues", vmin=0.0, vmax=1.0, interpolation="nearest")
+        title = ax.set_title(f"Mode {m+1} Dynamic Adjacency - Batch 0")
+        ax.set_xlabel("Node Index")
+        ax.set_ylabel("Node Index")
+
+        def update(frame_idx):
+            im.set_data(anim_data[frame_idx])
+            title.set_text(f"Mode {m+1} Dynamic Adjacency - Batch {frame_idx}")
+            return (im,)
+
+        ani = FuncAnimation(fig, update, frames=len(anim_data), interval=180, blit=False)
+        path = os.path.join(output_dir, f"mode{m+1}_dynamic_graph_evolution.gif")
+
+        try:
+            ani.save(path, writer=PillowWriter(fps=6))
+            gif_paths.append(path)
+        except Exception as ex:
+            print(f"[Warning] GIF export failed for mode {m+1}: {ex}")
+
+        plt.close(fig)
+
+    return gif_paths
+
+
 def save_metrics_json(metrics, graph_stats, output_dir):
     payload = {
         "overall_metrics": metrics["overall"],
@@ -663,6 +896,18 @@ def main():
     trainer = VMD_Trainer(runtime_args, data["scaler"], adj_mx, args.device)
     load_model_weights(trainer, args.model_path, args.device)
 
+    regime_graphs = None
+    if not args.skip_regime_comparison:
+        print("\n[2.5/5] Collecting graph regime comparisons (curriculum / pure_dynamic / pure_static)...")
+        original_defaults = _snapshot_modeprocessor_defaults(trainer)
+        regime_graphs = {
+            "curriculum": collect_regime_graph_series(trainer, data, args, "curriculum"),
+            "pure_dynamic": collect_regime_graph_series(trainer, data, args, "pure_dynamic"),
+            "pure_static": collect_regime_graph_series(trainer, data, args, "pure_static"),
+        }
+        _restore_modeprocessor_defaults(trainer, original_defaults)
+        _reset_graph_buffers(trainer)
+
     print("\n[3/5] Running test inference...")
     node_idx = int(np.clip(args.node_idx, 0, args.num_nodes - 1))
     args.node_idx = node_idx
@@ -674,6 +919,7 @@ def main():
     tod_idx = outputs["tod_idx"]
     dow_idx = outputs["dow_idx"]
     graphs = outputs["graphs"]
+    mode_graphs = outputs["mode_graphs"]
     mode_h1_global = outputs["mode_h1_global"]
     mode_h1_node = outputs["mode_h1_node"]
     mode_graph_density = outputs["mode_graph_density"]
@@ -718,6 +964,21 @@ def main():
     if mode_graph_path is not None:
         generated_files.append(mode_graph_path)
 
+    if regime_graphs is not None:
+        regime_density_path = plot_graph_regime_density(regime_graphs, args.output_dir)
+        if regime_density_path is not None:
+            generated_files.append(regime_density_path)
+
+        regime_snapshot_path = plot_graph_regime_snapshots(regime_graphs, args.graph_nodes, args.output_dir)
+        if regime_snapshot_path is not None:
+            generated_files.append(regime_snapshot_path)
+
+    mode_snap_path = plot_modewise_dynamic_graph_snapshots(
+        mode_graphs, args.graph_nodes, args.graph_snapshots, args.output_dir
+    )
+    if mode_snap_path is not None:
+        generated_files.append(mode_snap_path)
+
     graph_stats = dynamic_graph_stats(graphs)
     if graph_stats is not None:
         generated_files.append(plot_dynamic_graph_metrics(graph_stats, args.output_dir))
@@ -730,6 +991,9 @@ def main():
             gif_path = save_dynamic_graph_gif(graph_stats["bin_graphs"], args.graph_nodes, args.output_dir)
             if gif_path is not None:
                 generated_files.append(gif_path)
+
+            mode_gifs = save_modewise_dynamic_graph_gifs(mode_graphs, args.graph_nodes, args.output_dir)
+            generated_files.extend(mode_gifs)
 
     print("\n[5/5] Saving summary...")
     summary_path = save_metrics_json(metrics, graph_stats, args.output_dir)
