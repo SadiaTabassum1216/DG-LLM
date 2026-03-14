@@ -15,6 +15,8 @@ def parse_args() -> argparse.Namespace:
                         help="Root containing per-dataset model folders, e.g. ./models/PEMSD04/best_model.pth")
     parser.add_argument("--results_root", type=str, default="./results",
                         help="Directory to store output JSON files")
+    parser.add_argument("--dataset_root", type=str, default="./Dataset",
+                        help="Root directory containing dataset subfolders")
     parser.add_argument("--pattern", type=str, default="mcar", choices=["mcar", "block"])
     parser.add_argument("--fill_method", type=str, default="mean", choices=["zero", "mean", "ffill"])
     parser.add_argument("--block_len", type=int, default=3)
@@ -48,6 +50,7 @@ def main() -> None:
             sys.executable,
             "test_missing_data.py",
             "--data", ds,
+            "--root_path", args.dataset_root,
             "--model_path", model_path,
             "--output_json", output_json,
             "--pattern", args.pattern,
