@@ -6,8 +6,8 @@ This script loads a trained checkpoint, runs test inference once, and generates:
 2) Full test sequence ground-truth vs prediction at horizon-1
 3) Dynamic graph diagnostics (metrics, snapshots, optional GIF)
 4) Per-node day-window prediction (horizon 1, 288 samples)
-5) Error distribution histogram + prediction vs ground-truth scatter
-6) 1-week zoomed forecast for a selected node
+5) 1-week zoomed forecast for a selected node
+6) Mode-wise prediction/graph difference plots
 """
 
 import argparse
@@ -26,7 +26,6 @@ from trainer import VMD_Trainer
 from utils import MAE_torch, MAPE_torch, RMSE_torch, load_pickle
 from visualization import (
     visualize_model_predictions,
-    visualize_advanced_diagnostics,
     visualize_weekly_horizon1,
 )
 
@@ -181,6 +180,9 @@ def run_test_inference(trainer, data, args):
     all_tod_idx = []
     all_dow_idx = []
     graph_series = []
+    mode_h1_global = [[] for _ in range(args.vmd_k)]
+    mode_h1_node = [[] for _ in range(args.vmd_k)]
+    mode_graph_density = [[] for _ in range(args.vmd_k)]
 
     test_loader = data["test_loader"]
     scaler = data["scaler"]
@@ -199,6 +201,16 @@ def run_test_inference(trainer, data, args):
             # y is NOT scaled in the dataloader (only x is) — no inverse_transform needed
             real_unscaled = ty.permute(0, 2, 1).unsqueeze(-1).cpu()
 
+            # Per-mode predictions for mode-wise behavior diagnostics.
+            time_feats = x_in[..., 1:]
+            for k in range(args.vmd_k):
+                mode_flow = tvmd[:, k, ...]
+                mode_in = torch.cat([mode_flow, time_feats], dim=-1)
+                mode_pred_k, _ = trainer.model.mode_models[k](mode_in)
+                mode_pred_k = scaler.inverse_transform(mode_pred_k)
+                mode_h1_global[k].append(mode_pred_k[:, 0, :, 0].mean(dim=1).detach().cpu().numpy())
+                mode_h1_node[k].append(mode_pred_k[:, 0, args.node_idx, 0].detach().cpu().numpy())
+
             all_preds.append(pred_unscaled)
             all_reals.append(real_unscaled)
 
@@ -213,11 +225,21 @@ def run_test_inference(trainer, data, args):
                 g = torch.stack([gg.detach().cpu() for gg in graphs], dim=0).float().mean(dim=0)
                 graph_series.append(g.numpy())
 
+                for k, gk in enumerate(graphs):
+                    gk_bin = (gk.detach().cpu().numpy() >= 0.5).astype(np.float32)
+                    np.fill_diagonal(gk_bin, 0.0)
+                    N = gk_bin.shape[0]
+                    density = float(gk_bin.sum() / max(N * (N - 1), 1))
+                    mode_graph_density[k].append(density)
+
     preds = torch.cat(all_preds, dim=0)
     reals = torch.cat(all_reals, dim=0)
     tod_idx = np.concatenate(all_tod_idx, axis=0)
     dow_idx = np.concatenate(all_dow_idx, axis=0)
     graphs = np.stack(graph_series, axis=0) if graph_series else None
+    mode_h1_global = [np.concatenate(v, axis=0) if len(v) > 0 else np.array([]) for v in mode_h1_global]
+    mode_h1_node = [np.concatenate(v, axis=0) if len(v) > 0 else np.array([]) for v in mode_h1_node]
+    mode_graph_density = [np.array(v, dtype=np.float32) for v in mode_graph_density]
 
     return {
         "preds": preds,
@@ -225,6 +247,9 @@ def run_test_inference(trainer, data, args):
         "tod_idx": tod_idx,
         "dow_idx": dow_idx,
         "graphs": graphs,
+        "mode_h1_global": mode_h1_global,
+        "mode_h1_node": mode_h1_node,
+        "mode_graph_density": mode_graph_density,
     }
 
 
@@ -404,12 +429,14 @@ def plot_dynamic_graph_metrics(graph_stats, output_dir):
 
     axes[0].plot(x, graph_stats["density"], color="#1f77b4", linewidth=1.8)
     axes[0].set_title("Dynamic Graph Density Over Test Batches")
+    axes[0].set_xlabel("Test Batch Index")
     axes[0].set_ylabel("Edge Density")
     axes[0].grid(alpha=0.25)
 
     axes[1].plot(x, graph_stats["mean_degree"], color="#2ca02c", linewidth=1.8, label="Mean Degree")
     axes[1].plot(x, graph_stats["max_degree"], color="#d62728", linewidth=1.8, label="Max Degree")
     axes[1].set_title("Dynamic Graph Degree Statistics")
+    axes[1].set_xlabel("Test Batch Index")
     axes[1].set_ylabel("Degree")
     axes[1].legend()
     axes[1].grid(alpha=0.25)
@@ -434,25 +461,103 @@ def plot_dynamic_graph_snapshots(graphs_np, graph_nodes, graph_snapshots, output
 
     graph_nodes = min(graph_nodes, graphs_np.shape[1])
     picks = np.linspace(0, total - 1, num=min(graph_snapshots, total), dtype=int)
-    rows = len(picks)
+    ncols = 3
+    nrows = int(np.ceil(len(picks) / ncols))
 
-    fig, axes = plt.subplots(rows, 1, figsize=(10, 2.6 * rows), squeeze=False)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(4.2 * ncols, 4.2 * nrows), squeeze=False)
+    im = None
     for i, idx in enumerate(picks):
-        ax = axes[i, 0]
-        sns.heatmap(
+        r, c = divmod(i, ncols)
+        ax = axes[r, c]
+        im = ax.imshow(
             graphs_np[idx, :graph_nodes, :graph_nodes],
-            ax=ax,
             cmap="Blues",
             vmin=0.0,
             vmax=1.0,
-            cbar=(i == 0),
-            xticklabels=False,
-            yticklabels=False,
+            interpolation="nearest",
         )
-        ax.set_title(f"Dynamic Adjacency Snapshot - Batch {idx}")
+        ax.set_title(f"Batch {idx}")
+        ax.set_xlabel("Node Index")
+        ax.set_ylabel("Node Index")
+        ax.set_aspect("equal", adjustable="box")
+        if hasattr(ax, "set_box_aspect"):
+            ax.set_box_aspect(1)
+
+    for j in range(len(picks), nrows * ncols):
+        r, c = divmod(j, ncols)
+        axes[r, c].axis("off")
+
+    if im is not None:
+        fig.colorbar(im, ax=axes.ravel().tolist(), fraction=0.018, pad=0.02, label="Adjacency Value")
+
+    fig.suptitle("Dynamic Adjacency Snapshots (3 per row)", y=0.995)
 
     fig.tight_layout()
     path = os.path.join(output_dir, "dynamic_graph_snapshots.png")
+    fig.savefig(path, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+    return path
+
+
+def plot_modewise_prediction_differences(mode_h1_global, mode_h1_node, preds_np, reals_np, node_idx, output_dir):
+    if not mode_h1_global or len(mode_h1_global[0]) == 0:
+        return None
+
+    h1_pred_global = preds_np[:, 0, :, 0].mean(axis=1)
+    h1_real_global = reals_np[:, 0, :, 0].mean(axis=1)
+    h1_pred_node = preds_np[:, 0, node_idx, 0]
+    h1_real_node = reals_np[:, 0, node_idx, 0]
+    colors = plt.cm.tab10(np.linspace(0, 1, len(mode_h1_global)))
+
+    fig, axes = plt.subplots(2, 1, figsize=(16, 10), sharex=True)
+
+    for k, arr in enumerate(mode_h1_global):
+        axes[0].plot(arr, linewidth=1.0, alpha=0.8, color=colors[k], label=f"Mode {k+1}")
+    axes[0].plot(h1_pred_global, color="black", linewidth=1.8, label="Final Prediction")
+    axes[0].plot(h1_real_global, color="#1f77b4", linewidth=1.8, linestyle="--", label="Ground Truth")
+    axes[0].set_title("Mode-wise Horizon-1 Differences (Network Mean)")
+    axes[0].set_ylabel("Traffic Flow")
+    axes[0].set_xlabel("Test Sample Index")
+    axes[0].legend(ncol=3)
+    axes[0].grid(alpha=0.25)
+
+    for k, arr in enumerate(mode_h1_node):
+        axes[1].plot(arr, linewidth=1.0, alpha=0.8, color=colors[k], label=f"Mode {k+1}")
+    axes[1].plot(h1_pred_node, color="black", linewidth=1.8, label="Final Prediction")
+    axes[1].plot(h1_real_node, color="#d62728", linewidth=1.8, linestyle="--", label="Ground Truth")
+    axes[1].set_title(f"Mode-wise Horizon-1 Differences (Node {node_idx})")
+    axes[1].set_ylabel("Traffic Flow")
+    axes[1].set_xlabel("Test Sample Index")
+    axes[1].legend(ncol=3)
+    axes[1].grid(alpha=0.25)
+
+    fig.tight_layout()
+    path = os.path.join(output_dir, "modewise_h1_differences.png")
+    fig.savefig(path, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+    return path
+
+
+def plot_modewise_graph_density(mode_graph_density, output_dir):
+    has_data = any(len(v) > 0 for v in mode_graph_density)
+    if not has_data:
+        return None
+
+    colors = plt.cm.tab10(np.linspace(0, 1, len(mode_graph_density)))
+    fig, ax = plt.subplots(1, 1, figsize=(14, 4.8))
+    for k, arr in enumerate(mode_graph_density):
+        if len(arr) == 0:
+            continue
+        ax.plot(arr, color=colors[k], linewidth=1.8, label=f"Mode {k+1}")
+
+    ax.set_title("Mode-wise Dynamic Graph Density Over Test Batches")
+    ax.set_xlabel("Test Batch Index")
+    ax.set_ylabel("Edge Density")
+    ax.grid(alpha=0.25)
+    ax.legend(ncol=min(len(mode_graph_density), 6))
+
+    fig.tight_layout()
+    path = os.path.join(output_dir, "modewise_graph_density.png")
     fig.savefig(path, dpi=180, bbox_inches="tight")
     plt.close(fig)
     return path
@@ -562,6 +667,9 @@ def main():
     load_model_weights(trainer, args.model_path, args.device)
 
     print("\n[3/5] Running test inference...")
+    node_idx = int(np.clip(args.node_idx, 0, args.num_nodes - 1))
+    args.node_idx = node_idx
+
     outputs = run_test_inference(trainer, data, args)
 
     preds = outputs["preds"]
@@ -569,8 +677,10 @@ def main():
     tod_idx = outputs["tod_idx"]
     dow_idx = outputs["dow_idx"]
     graphs = outputs["graphs"]
+    mode_h1_global = outputs["mode_h1_global"]
+    mode_h1_node = outputs["mode_h1_node"]
+    mode_graph_density = outputs["mode_graph_density"]
 
-    node_idx = int(np.clip(args.node_idx, 0, args.num_nodes - 1))
     metrics = compute_metrics(preds, reals)
 
     print("\n[4/5] Creating visualizations...")
@@ -592,15 +702,6 @@ def main():
         )
     )
 
-    # --- error distribution + scatter (from visualization.py) ---
-    generated_files.append(
-        visualize_advanced_diagnostics(
-            preds, reals,
-            node_idx=node_idx,
-            save_dir=args.output_dir,
-        )
-    )
-
     # --- 1-week zoomed forecast (from visualization.py) ---
     generated_files.append(
         visualize_weekly_horizon1(
@@ -609,6 +710,16 @@ def main():
             save_dir=args.output_dir,
         )
     )
+
+    mode_pred_path = plot_modewise_prediction_differences(
+        mode_h1_global, mode_h1_node, preds_np, reals_np, node_idx, args.output_dir
+    )
+    if mode_pred_path is not None:
+        generated_files.append(mode_pred_path)
+
+    mode_graph_path = plot_modewise_graph_density(mode_graph_density, args.output_dir)
+    if mode_graph_path is not None:
+        generated_files.append(mode_graph_path)
 
     graph_stats = dynamic_graph_stats(graphs)
     if graph_stats is not None:
