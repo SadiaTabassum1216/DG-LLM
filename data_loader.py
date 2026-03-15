@@ -5,6 +5,37 @@ from utils import StandardScaler
 from vmd_utils import precompute_vmd
 
 
+def _ensure_writable_dir(preferred_dir, dataset_name):
+    """Return a writable cache directory, falling back when preferred is read-only."""
+    try:
+        os.makedirs(preferred_dir, exist_ok=True)
+        test_path = os.path.join(preferred_dir, ".write_test")
+        with open(test_path, "w", encoding="utf-8") as f:
+            f.write("ok")
+        os.remove(test_path)
+        return preferred_dir
+    except OSError:
+        pass
+
+    fallback_candidates = []
+    kaggle_working = os.environ.get("KAGGLE_WORKING_DIR", "")
+    if kaggle_working:
+        fallback_candidates.append(os.path.join(kaggle_working, "vmd_cache", dataset_name))
+    fallback_candidates.append(os.path.join("/kaggle/working", "vmd_cache", dataset_name))
+    fallback_candidates.append(os.path.join(".", "vmd_cache_fallback", dataset_name))
+
+    for cand in fallback_candidates:
+        try:
+            os.makedirs(cand, exist_ok=True)
+            return cand
+        except OSError:
+            continue
+
+    raise OSError(
+        f"Could not create writable cache directory. Tried: {preferred_dir} and {fallback_candidates}"
+    )
+
+
 def reconstruct_raw_from_windows(x, y, original_input_len=12, original_output_len=12):
     """
     Reconstruct raw time series from overlapping sliding windows (step=1).
@@ -167,9 +198,12 @@ def load_dataset_optimized(dataset_dir, batch_size, args, force_recompute=False)
     Automatically handles reprocessing if input_len/output_len differ from stored data.
     """
     # Cache directories - respect explicit args if provided
-    output_cache_dir = getattr(args, "vmd_cache_dir", "./vmd_cache")
+    preferred_cache_dir = getattr(args, "vmd_cache_dir", "./vmd_cache")
+    output_cache_dir = _ensure_writable_dir(preferred_cache_dir, args.data)
     input_cache_dir = getattr(args, "vmd_cache_dir", f"./vmd_cache_{args.data}")
-    os.makedirs(output_cache_dir, exist_ok=True)
+    if output_cache_dir != preferred_cache_dir:
+        print(f"  [Warning] Cache dir not writable: {preferred_cache_dir}")
+        print(f"            Using writable cache dir: {output_cache_dir}")
 
     data = {}
     cumulative_offset = 0
@@ -294,7 +328,14 @@ def load_dataset_optimized(dataset_dir, batch_size, args, force_recompute=False)
         else:
             print(f"  [Cache Miss] Computing VMD for {split_name} (K={args.vmd_k})...")
             vmd_result = precompute_vmd(data_input, vmd_k=args.vmd_k, max_workers=4)
-            np.save(target_path, vmd_result)
+            try:
+                np.save(target_path, vmd_result)
+            except OSError:
+                # Last-resort fallback in case the selected cache path becomes unwritable.
+                backup_dir = _ensure_writable_dir(os.path.join(".", "vmd_cache_fallback", args.data), args.data)
+                backup_path = os.path.join(backup_dir, filename)
+                np.save(backup_path, vmd_result)
+                print(f"  [Warning] Could not save cache to {target_path}. Saved to {backup_path}")
             return vmd_result
 
     print("Checking VMD Cache...")
