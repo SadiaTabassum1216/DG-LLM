@@ -42,6 +42,10 @@ def parse_args():
                         help='Top U layers are fully trainable (default: 1)')
     parser.add_argument('--vmd_k', type=int, default=3,
                         help='Number of VMD modes (default: 3)')
+    parser.add_argument('--lora_r', type=int, default=16, dest='lora_rank',
+                        help='LoRA rank r (default: 16)')
+    parser.add_argument('--lora_alpha', type=int, default=32,
+                        help='LoRA alpha scaling factor (default: 32)')
     
     # I/O dimensions
     parser.add_argument('--input_dim', type=int, default=3,

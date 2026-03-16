@@ -12,16 +12,17 @@ Traffic forecasting is a crucial part of urban planning, and it is critical to u
 
 - **VMD**: Per-sample decomposition (no data leakage between train/val/test)
 - **Dynamic Graph Learning**: Learned adjacency via multi-head GAT with curriculum learning
-- **GPT-2 Backbone**: Pre-trained LLM adapted for time series with LoRA fine-tuning
+- **Pretrained LLM Backbone**: Pre-trained LLM adapted for time series with LoRA fine-tuning
 
 ## How to Run
 
 1. **Install Dependencies**:
+
    ```bash
    pip install -r requirements.txt
    ```
 
-2. **Prepare Data**: 
+2. **Prepare Data**:
    - Download datasets from the link below
    - Extract to `./Dataset/<dataset_name>/`
    - Each dataset folder should contain:
@@ -29,46 +30,19 @@ Traffic forecasting is a crucial part of urban planning, and it is critical to u
      - `processed/` folder with `train.npz`, `val.npz`, `test.npz`
 
 3. **Run Training**:
+
    ```bash
    python main.py
    ```
-
-### Run Different Input-Output Horizons
-
-DG-LLM supports arbitrary input/output sequence lengths through `--input_len` and `--output_len`.
-
-- 12-12 (default):
-   ```bash
-   python main.py --data PEMSD04 --input_len 12 --output_len 12
-   ```
-
-- 48-48:
-   ```bash
-   python main.py --data PEMSD04 --input_len 48 --output_len 48
-   ```
-
-- 96-96:
-   ```bash
-   python main.py --data PEMSD04 --input_len 96 --output_len 96
-   ```
-
-You can also run multiple horizons in one command with the helper script:
-
-```bash
-python run_statistical_experiment.py --mode multi --dataset PEMSD04 --num_seeds 5 --horizon_pairs 12:12 48:48 96:96
-```
 
 ## Dataset Download
 
 The datasets are available on Google Drive: **[Datasets](https://drive.google.com/file/d/19LkZXBCS7E2SCuM2ZQ7YKT7L0-wMXrJa/view?usp=sharing)**
 
-## Run on Kaggle
-
-[![Open in Kaggle](https://kaggle.com/static/images/open-in-kaggle.svg)](https://www.kaggle.com/code/sadia1216/dgllm)
 
 ## Dataset Format
 
-```
+```text
 Dataset/
 ├── PEMSD04/
 │   ├── adj_mx.pkl          # Adjacency matrix [307, 307]
@@ -82,6 +56,46 @@ Dataset/
 ├── taxi_drop/              # 266 nodes
 └── taxi_pick/              # 266 nodes
 ```
+
+
+## Run on Kaggle
+
+[![Open in Kaggle](https://kaggle.com/static/images/open-in-kaggle.svg)](https://www.kaggle.com/code/sadia1216/dgllm)
+
+
+
+### Run Different Input-Output Horizons
+
+- 12-12 (default):
+
+   ```bash
+   python main.py --data PEMSD04 --input_len 12 --output_len 12
+   ```
+
+- 48-96:
+
+   ```bash
+   python main.py --data PEMSD04 --input_len 48 --output_len 96
+   ```
+
+
+
+
+
+
+### Run Compatible-Only Zero-Shot Transfer:
+
+   ```bash
+   python zero_shot_transfer.py --source_data taxi_drop --target_data PEMSD04
+   ```
+
+   You can also provide an explicit checkpoint path:
+
+   ```bash
+   python zero_shot_transfer.py --target_data PEMSD04 --model_path ./logs/taxi_drop/best_model.pth
+   ```
+
+
 
 ## Acknowledgements
 
