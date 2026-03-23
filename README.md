@@ -39,7 +39,6 @@ Traffic forecasting is a crucial part of urban planning, and it is critical to u
 
 The datasets are available on Google Drive: **[Datasets](https://drive.google.com/file/d/19LkZXBCS7E2SCuM2ZQ7YKT7L0-wMXrJa/view?usp=sharing)**
 
-
 ## Dataset Format
 
 ```text
@@ -57,12 +56,9 @@ Dataset/
 └── taxi_pick/              # 266 nodes
 ```
 
-
 ## Run on Kaggle
 
 [![Open in Kaggle](https://kaggle.com/static/images/open-in-kaggle.svg)](https://www.kaggle.com/code/sadia1216/dgllm)
-
-
 
 ### Run Different Input-Output Horizons
 
@@ -77,25 +73,6 @@ Dataset/
    ```bash
    python main.py --data PEMSD04 --input_len 48 --output_len 96
    ```
-
-
-
-
-
-
-### Run Compatible-Only Zero-Shot Transfer:
-
-   ```bash
-   python zero_shot_transfer.py --source_data taxi_drop --target_data PEMSD04
-   ```
-
-   You can also provide an explicit checkpoint path:
-
-   ```bash
-   python zero_shot_transfer.py --target_data PEMSD04 --model_path ./logs/taxi_drop/best_model.pth
-   ```
-
-
 
 ## Acknowledgements
 
