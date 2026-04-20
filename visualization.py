@@ -3,9 +3,12 @@ import seaborn as sns
 import torch
 import numpy as np
 import os
+from paths import RESULTS_LOGS_DIR
 
-def visualize_model_predictions(preds, reals, node_idx=0, horizon_idx=0, num_samples=288, save_dir='./logs'):
+
+def visualize_model_predictions(preds, reals, node_idx=0, horizon_idx=0, num_samples=288, save_dir=None):
     """Compare Predicted vs Real values for a specific node and horizon."""
+    save_dir = save_dir or str(RESULTS_LOGS_DIR)
     os.makedirs(save_dir, exist_ok=True)
     plt.figure(figsize=(15, 5))
     plt.plot(reals[:num_samples, horizon_idx, node_idx, 0].cpu().numpy(), label='Ground Truth', color='blue', alpha=0.7)
@@ -19,8 +22,9 @@ def visualize_model_predictions(preds, reals, node_idx=0, horizon_idx=0, num_sam
     print(f"  Saved: {save_path}")
     return save_path
 
-def visualize_advanced_diagnostics(preds, reals, node_idx=0, save_dir='./logs'):
+def visualize_advanced_diagnostics(preds, reals, node_idx=0, save_dir=None):
     """Plot Error Distribution and Prediction vs Truth Scatter."""
+    save_dir = save_dir or str(RESULTS_LOGS_DIR)
     os.makedirs(save_dir, exist_ok=True)
     p = preds[:, 0, node_idx, 0].cpu().numpy()
     r = reals[:, 0, node_idx, 0].cpu().numpy()
@@ -46,8 +50,9 @@ def visualize_advanced_diagnostics(preds, reals, node_idx=0, save_dir='./logs'):
     print(f"  Saved: {save_path}")
     return save_path
 
-def visualize_weekly_horizon1(preds, reals, node_idx=0, save_dir='./logs'):
+def visualize_weekly_horizon1(preds, reals, node_idx=0, save_dir=None):
     """Zoomed in view of 1-week of forecasts."""
+    save_dir = save_dir or str(RESULTS_LOGS_DIR)
     os.makedirs(save_dir, exist_ok=True)
     # 288 steps/day * 7 days = 2016 steps
     steps = min(2016, preds.shape[0])

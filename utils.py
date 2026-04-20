@@ -65,18 +65,6 @@ def metric(pred, real):
     rmse = RMSE_torch(pred, real, 0).item()
     return mae, mape, rmse, wmape
 
-def metric_per_horizon(pred, real):
-    """Calculate MAE, MAPE, RMSE metrics for each prediction horizon."""
-    # pred/real shape: [Batch, Horizon, Nodes, 1]
-    mae_list, mape_list, rmse_list = [], [], []
-    for t in range(real.shape[1]):
-        p = pred[:, t, ...]
-        r = real[:, t, ...]
-        mae_list.append(MAE_torch(p, r, 0).item())
-        mape_list.append(MAPE_torch(p, r, 0).item())
-        rmse_list.append(RMSE_torch(p, r, 0).item())
-    return mae_list, mape_list, rmse_list
-
 class Ranger(Optimizer):
     """Ranger optimizer (RAdam + LookAhead + Gradient Centralization)."""
     def __init__(self, params, lr=1e-3, alpha=0.5, k=6, N_sma_threshhold=5, betas=(0.95, 0.999), eps=1e-5, weight_decay=0, use_gc=True, gc_conv_only=False):

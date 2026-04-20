@@ -1,18 +1,10 @@
-venv
+﻿venv
 __pycache__
-.vscode
 
 Dataset
 Dataset_missing
 models
-Baselines
 
-analysis_tools
-data_loss-decomposition
-dataset_visualizations
-decomposition_analysis
-notebook
-rebuttal_figures
+analysis
+docs
 results
-test_visualizations
-vmd_visualizations

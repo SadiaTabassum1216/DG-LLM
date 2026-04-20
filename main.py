@@ -12,6 +12,7 @@ from visualization import visualize_model_predictions, verify_temporal_features,
 from utils import load_pickle
 from experiment_utils import seed_everything, compute_statistics, save_statistical_results
 from evaluate import evaluate_model_statistical
+from paths import DATASET_DIR, RESULTS_LOGS_DIR
 
 
 def parse_args():
@@ -22,8 +23,8 @@ def parse_args():
     parser.add_argument('--data', type=str, default='PEMSD04',
                         choices=['PEMSD04', 'PEMSD08', 'bike_drop', 'bike_pick', 'taxi_drop', 'taxi_pick'],
                         help='Dataset name (default: PEMSD04)')
-    parser.add_argument('--root_path', type=str, default='./Dataset/',
-                        help='Root path for datasets (default: ./Dataset/)')
+    parser.add_argument('--root_path', type=str, default=str(DATASET_DIR),
+                        help='Root path for datasets')
     
     # Training
     parser.add_argument('--epochs', type=int, default=50,
@@ -56,8 +57,8 @@ def parse_args():
                         help='Output/prediction length (default: 12)')
     
     # Misc
-    parser.add_argument('--log_dir', type=str, default='./logs',
-                        help='Directory for saving logs and checkpoints (default: ./logs)')
+    parser.add_argument('--log_dir', type=str, default=str(RESULTS_LOGS_DIR),
+                        help='Directory for saving logs and checkpoints')
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed (default: 42)')
     parser.add_argument('--test_only', action='store_true',
@@ -314,7 +315,11 @@ def main():
         print(f"{'='*70}")
         
         # Compute and display per-horizon statistics
-        from horizon_stats import aggregate_per_horizon_metrics, print_per_horizon_statistics, save_per_horizon_statistics
+        from analysis.horizon_stats import (
+            aggregate_per_horizon_metrics,
+            print_per_horizon_statistics,
+            save_per_horizon_statistics,
+        )
         
         horizon_metrics = {k: v for k, v in all_results.items() if k.startswith('horizon_')}
         if horizon_metrics:
@@ -489,11 +494,11 @@ def main():
             print(f"   Predictions shape: {preds.shape}")
             print(f"   Ground truth shape: {reals.shape}")
             
-            visualize_model_predictions(preds, reals, node_idx=0, horizon_idx=0)
-            visualize_advanced_diagnostics(preds, reals, node_idx=0)
-            visualize_weekly_horizon1(preds, reals, node_idx=0)
+            visualize_model_predictions(preds, reals, node_idx=0, horizon_idx=0, save_dir=args.log_dir)
+            visualize_advanced_diagnostics(preds, reals, node_idx=0, save_dir=args.log_dir)
+            visualize_weekly_horizon1(preds, reals, node_idx=0, save_dir=args.log_dir)
             
-            print("\n✓ Visualizations saved to ./logs/")
+            print(f"\n✓ Visualizations saved to {args.log_dir}")
             print("  - predictions_node0_h0.png")
             print("  - diagnostics_node0.png")
             print("  - weekly_node0.png")

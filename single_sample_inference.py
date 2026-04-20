@@ -26,6 +26,7 @@ from types import SimpleNamespace
 from trainer import VMD_Trainer
 from utils import StandardScaler, MAE_torch, RMSE_torch, MAPE_torch, load_pickle
 from vmd_utils import decompose_single_window
+from paths import DATASET_DIR, MODELS_DIR, RESULTS_FIGURES_DIR, RESULTS_LOGS_DIR
 
 
 DATASET_NUM_NODES = {
@@ -42,7 +43,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description='DG-LLM Single Sample Inference')
     parser.add_argument('--data', type=str, default='taxi_drop',
                         choices=list(DATASET_NUM_NODES.keys()))
-    parser.add_argument('--root_path', type=str, default='./Dataset')
+    parser.add_argument('--root_path', type=str, default=str(DATASET_DIR))
     parser.add_argument('--model_path', type=str, default=None,
                         help='Path to best_model.pth (default: models/<data>/best_model.pth)')
     parser.add_argument('--sample_idx', type=int, default=42,
@@ -61,7 +62,7 @@ def parse_args():
     args.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     if args.model_path is None:
-        args.model_path = os.path.join("models", args.data, "best_model.pth")
+        args.model_path = os.path.join(str(MODELS_DIR), args.data, "best_model.pth")
 
     return args
 
@@ -234,7 +235,7 @@ def main():
         vmd_k=args.vmd_k,
         num_nodes=args.num_nodes,
         device=args.device,
-        log_dir="./logs",
+        log_dir=str(RESULTS_LOGS_DIR),
         lrate=1e-3,
         wdecay=1e-5,
         grad_accum_steps=1,
@@ -453,7 +454,7 @@ def main():
     plt.tight_layout()
 
     # Save plot
-    plot_dir = os.path.join("vmd_visualizations", args.data)
+    plot_dir = os.path.join(str(RESULTS_FIGURES_DIR), "vmd", args.data)
     os.makedirs(plot_dir, exist_ok=True)
     plot_path = os.path.join(plot_dir, f"single_sample_{idx}.png")
     fig.savefig(plot_path, dpi=180, bbox_inches='tight')

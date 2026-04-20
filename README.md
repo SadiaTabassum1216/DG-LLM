@@ -2,11 +2,11 @@
 
 ## Abstract
 
-Traffic forecasting is a crucial part of urban planning, and it is critical to understand the evolution of urban traffic patterns. However, the current state-of-the-art models struggle to capture the spatiotemporal dependency of traffic data, and struggle with long-range dependency capturing because of its inherent entangled multi-scale nature. This paper proposes a novel spatiotemporal forecasting framework named DG-LLM that bridges the gap between signal decomposition, dynamic graph learning, and the reasoning capabilities of pretrained Large Language Models (LLMs). Our approach explicitly decomposes traffic signals into intrinsic temporal modes, learns mode-dependent dynamic graphs, and integrates these structures into a pretrained LLM using spatially constrained attention and efficient fine-tuning strategies. We conducted comprehensive experiments on six real world datasets, covering both grid-based and graph-structured traffic networks, and performed both short term and long term forecasting analysis. Experimental results demonstrate that our approach consistently outperforms benchmark models across diverse datasets and forecasting horizons. Our model achieves an overall average improvement of **14.09%** in MAE and **20.88%** in RMSE across all datasets with the benchmark models. Comprehensive ablation studies further validate the effectiveness of each component, highlighting the benefits of multi-scale temporal decomposition, dynamic spatial modeling, and parameter-efficient LLM adaptation. Furthermore, by utilizing Low-Rank Adaptation (LoRA), we demonstrate that the expansive knowledge within LLM backbones can be harnessed efficiently, reducing the parameter overhead associated with fine tuning large-scale transformers.
+Traffic forecasting plays a critical role in the field of urban planning. Yet, existing methods struggle with modeling complicated spatiotemporal dependencies and capturing long-term patterns due to their multiscale nature. In this paper, we present a novel framework named DG-LLM that leverages the advantages of decomposed temporal representations and adaptive spatial connectivity to model spatiotemporal dependencies. In this framework, traffic signals are decomposed into intrinsic modes, and dynamic graphs are learned for each mode to represent the spatial dependencies. These representations are then incorporated with pre-trained Large Language Models for effective long-range temporal dependency modeling.  We conducted comprehensive experiments across six real-world traffic datasets spanning urban mobility systems and highway traffic networks and evaluated short- and long-term forecasting. Experimental results demonstrate that our framework provides significant improvements over state-of-the-art approaches, including benchmark graph- and LLM-based spatiotemporal forecasting models, even in long-term forecasting scenarios with severe temporal instability. Our model outperforms other methods by achieving $13-19\%$ improvements in MAE and $19-25\%$ in RMSE across all six benchmarks compared with baseline approaches. Additional analyses, including ablation studies, robustness to missing data, and zero-shot cross-dataset evaluation, further validate the effectiveness and generalization capability of the proposed framework.
 
 ## Architecture
 
-![DG-LLM Architecture](Images/architecture.png)
+![DG-LLM Architecture](assets/architecture.png)
 
 ## Key Features
 
@@ -35,6 +35,13 @@ Traffic forecasting is a crucial part of urban planning, and it is critical to u
    python main.py
    ```
 
+4. **Run Analysis**:
+
+   ```bash
+   python -m analysis.zero_shot_transfer --source_data PEMSD04 --target_data PEMSD08
+   python -m analysis.analyze_zero_shot_results
+   ```
+
 ## Dataset Download
 
 The datasets are available on Google Drive: **[Datasets](https://drive.google.com/file/d/19LkZXBCS7E2SCuM2ZQ7YKT7L0-wMXrJa/view?usp=sharing)**
@@ -43,17 +50,17 @@ The datasets are available on Google Drive: **[Datasets](https://drive.google.co
 
 ```text
 Dataset/
-├── PEMSD04/
-│   ├── adj_mx.pkl          # Adjacency matrix [307, 307]
-│   └── processed/
-│       ├── train.npz       # x: [Samples, 12, 307, F], y: [Samples, 12, 307, 1]
-│       ├── val.npz
-│       └── test.npz
-├── PEMSD08/                # 170 nodes
-├── bike_drop/              # 250 nodes
-├── bike_pick/              # 250 nodes
-├── taxi_drop/              # 266 nodes
-└── taxi_pick/              # 266 nodes
+|-- PEMSD04/
+|   |-- adj_mx.pkl          # Adjacency matrix [307, 307]
+|   `-- processed/
+|       |-- train.npz       # x: [Samples, 12, 307, F], y: [Samples, 12, 307, 1]
+|       |-- val.npz
+|       `-- test.npz
+|-- PEMSD08/                # 170 nodes
+|-- bike_drop/              # 250 nodes
+|-- bike_pick/              # 250 nodes
+|-- taxi_drop/              # 266 nodes
+`-- taxi_pick/              # 266 nodes
 ```
 
 ## Run on Kaggle
