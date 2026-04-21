@@ -1,60 +1,58 @@
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
-from temporal_embedding import TemporalEmbedding
+
 from backbone import GraphAwareGPTBackbone
+from temporal_embedding import TemporalEmbedding
 
 
 class ModeProcessor(nn.Module):
     """
-    Spatio-Temporal LLM for a single VMD mode.
-    
-    Combines:
-    - Temporal multi-scale convolutions
-    - Dynamic graph learning via GAT
-    - GPT-2 backbone with graph attention
+    Spatio-temporal processor for a single VMD mode.
     """
+
     def __init__(
-        self, 
-        device, 
-        adj_mx, 
-        input_dim=3, 
-        num_nodes=266,      
-        input_len=12, 
-        output_len=12, 
-        llm_layer=6, 
-        U=1,   
-        # Dynamic Graph Hyperparams
+        self,
+        device,
+        adj_mx,
+        input_dim=3,
+        num_nodes=266,
+        input_len=12,
+        output_len=12,
+        llm_layer=6,
+        U=1,
         use_dynamic_graph=True,
-        heads=4, 
-        tau_hi=0.8, 
-        tau_lo=0.5, 
-        p_keep=0.15, 
+        heads=4,
+        tau_hi=0.8,
+        tau_lo=0.5,
+        p_keep=0.15,
         min_neighbors=20,
-        mix_hi=0.6, 
-        mix_lo=0.2, 
-        k_min=16, 
-        k_max=28
+        mix_hi=0.6,
+        mix_lo=0.2,
+        k_min=16,
+        k_max=28,
     ):
         super().__init__()
-        self.device = device
+
+        # Preserved in the signature for compatibility with older call sites.
+        del tau_hi, tau_lo, min_neighbors, k_min, k_max
+
         self.adj_mx = torch.tensor(adj_mx, dtype=torch.float32).to(device)
         self.input_dim = input_dim
         self.num_nodes = num_nodes
-        self.output_len = output_len
         self.use_dynamic_graph = use_dynamic_graph
-        
-        # Dynamic Graph Params
+
         self.heads = heads
-        self.tau_hi, self.tau_lo = tau_hi, tau_lo
         self.p_keep = p_keep
-        self.min_neighbors = int(min_neighbors)
+        self.mix_hi = mix_hi
+        self.mix_lo = mix_lo
 
         self.register_buffer("global_step", torch.zeros((), dtype=torch.long))
         self.register_buffer("ema_A", torch.zeros((num_nodes, num_nodes)))
         self.register_buffer("prev_A", torch.zeros((num_nodes, num_nodes)))
-        
+
         self.head_dropout = 0.1
         self.leaky_slope = 0.2
         self.gat_tau = 1.0
@@ -65,269 +63,268 @@ class ModeProcessor(nn.Module):
         self.hysteresis_ratio = 0.8
         self.warmup_steps = 500
 
-        self.k_min, self.k_max = k_min, k_max
-        self.mix_hi, self.mix_lo = mix_hi, mix_lo
+        time_steps = 288  # PEMS uses 5-minute intervals.
+        gpt_channel = 256
+        backbone_channel = 768
 
-        # Dimensions - 768 for GPT-2 compatibility
-        time_steps = 288  # PEMS (5-min intervals)
-        gpt_channel, to_gpt_channel = 256, 768
-        
-        # Front-end
         self.start_conv = nn.Conv2d(input_dim * input_len, gpt_channel, kernel_size=(1, 1))
-        self.Temb = TemporalEmbedding(time_steps, gpt_channel)
+        self.temporal_embedding = TemporalEmbedding(time_steps, gpt_channel)
         self.node_emb = nn.Parameter(torch.empty(num_nodes, gpt_channel))
         nn.init.xavier_uniform_(self.node_emb)
-        
-        self.in_layer = nn.Conv2d(gpt_channel * 3, to_gpt_channel, kernel_size=(1, 1))
-        self.feat_norm = nn.LayerNorm(to_gpt_channel)
-        
-        # Graph Learning Parts
-        self.gat_q = nn.Linear(to_gpt_channel, to_gpt_channel, bias=False)
-        self.gat_k = nn.Linear(to_gpt_channel, to_gpt_channel, bias=False)
-        self.gat_a = nn.Parameter(torch.randn(heads, 2 * to_gpt_channel, 1) * (1.0 / math.sqrt(to_gpt_channel)))
-        self.bilin_W = nn.Parameter(torch.randn(to_gpt_channel, to_gpt_channel) * (1.0 / math.sqrt(to_gpt_channel)))
-        
-        # Temporal Multi-scale
-        self.tconv1 = nn.Conv1d(input_dim, gpt_channel, 1, padding=0, bias=False)
-        self.tconv3 = nn.Conv1d(input_dim, gpt_channel, 3, padding=1, bias=False)
-        self.tconv5 = nn.Conv1d(input_dim, gpt_channel, 5, padding=2, bias=False)
-        self.tproj = nn.Linear(3 * gpt_channel, to_gpt_channel, bias=False)
-        self.tgate = nn.Linear(to_gpt_channel, to_gpt_channel)
-        
-        # Backbone
-        self.gpt = GraphAwareGPTBackbone(device, gpt_layers=llm_layer, U=U, dropout_rate=0.1)
-        self.regression_layer = nn.Conv2d(to_gpt_channel, output_len, kernel_size=(1, 1))
 
-    def _schedule(self):
-        t = float(self.global_step.item())
-        T = max(self.warmup_steps, 1)
-        k = int(round(self.k_min + (self.k_max - self.k_min) * min(t / T, 1.0)))
-        mix = self.mix_hi + (self.mix_lo - self.mix_hi) * min(t / T, 1.0)
-        return k, mix
+        self.input_projection = nn.Conv2d(gpt_channel * 3, backbone_channel, kernel_size=(1, 1))
+        self.feature_norm = nn.LayerNorm(backbone_channel)
 
-    def _degree_prior(self, A):
-        degree = A.sum(dim=-1, keepdim=True)
-        max_deg = degree.max() + 1e-6
-        return degree / max_deg
+        self.gat_q = nn.Linear(backbone_channel, backbone_channel, bias=False)
+        self.gat_k = nn.Linear(backbone_channel, backbone_channel, bias=False)
+        self.gat_a = nn.Parameter(
+            torch.randn(heads, 2 * backbone_channel, 1) * (1.0 / math.sqrt(backbone_channel))
+        )
 
-    def _to_BTSF(self, x):
-        if x.dim() == 4 and x.shape[1] == self.input_dim: 
+        self.temporal_conv_1 = nn.Conv1d(input_dim, gpt_channel, 1, padding=0, bias=False)
+        self.temporal_conv_3 = nn.Conv1d(input_dim, gpt_channel, 3, padding=1, bias=False)
+        self.temporal_conv_5 = nn.Conv1d(input_dim, gpt_channel, 5, padding=2, bias=False)
+        self.temporal_projection = nn.Linear(3 * gpt_channel, backbone_channel, bias=False)
+        self.temporal_gate = nn.Linear(backbone_channel, backbone_channel)
+
+        self.backbone = GraphAwareGPTBackbone(
+            device,
+            gpt_layers=llm_layer,
+            U=U,
+            dropout_rate=0.1,
+        )
+        self.regression_layer = nn.Conv2d(backbone_channel, output_len, kernel_size=(1, 1))
+
+    def _ensure_btsf_layout(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Normalize inputs to [B, T, N, F].
+        """
+        if x.dim() == 4 and x.shape[1] == self.input_dim:
             return x.permute(0, 3, 2, 1).contiguous()
         return x
 
-    def _temporal_ms_feats(self, history_data):
-        B, T, S, Fdim = history_data.shape
-        x = history_data.permute(0, 2, 3, 1).reshape(B * S, Fdim, T)
-        b1 = F.adaptive_avg_pool1d(F.relu(self.tconv1(x)), 1).squeeze(-1)
-        b3 = F.adaptive_avg_pool1d(F.relu(self.tconv3(x)), 1).squeeze(-1)
-        b5 = F.adaptive_avg_pool1d(F.relu(self.tconv5(x)), 1).squeeze(-1)
-        feats = torch.cat([b1, b3, b5], dim=-1)
-        feats = self.tproj(feats).view(B, S, -1)
-        return feats
+    def _compute_temporal_multiscale_features(self, history_data: torch.Tensor) -> torch.Tensor:
+        batch_size, time_steps, num_nodes, feature_dim = history_data.shape
+        x = history_data.permute(0, 2, 3, 1).reshape(batch_size * num_nodes, feature_dim, time_steps)
 
-    def _build_adjacency(self, feats) -> torch.Tensor:
+        branch_1 = F.adaptive_avg_pool1d(F.relu(self.temporal_conv_1(x)), 1).squeeze(-1)
+        branch_3 = F.adaptive_avg_pool1d(F.relu(self.temporal_conv_3(x)), 1).squeeze(-1)
+        branch_5 = F.adaptive_avg_pool1d(F.relu(self.temporal_conv_5(x)), 1).squeeze(-1)
+
+        temporal_features = torch.cat([branch_1, branch_3, branch_5], dim=-1)
+        temporal_features = self.temporal_projection(temporal_features)
+        return temporal_features.view(batch_size, num_nodes, -1)
+
+    def _current_graph_mix(self) -> float:
+        step = float(self.global_step.item())
+        warmup = max(self.warmup_steps, 1)
+        progress = min(step / warmup, 1.0)
+        return self.mix_hi + (self.mix_lo - self.mix_hi) * progress
+
+    def _compute_degree_prior(self, adjacency_scores: torch.Tensor) -> torch.Tensor:
+        degree = adjacency_scores.sum(dim=-1, keepdim=True)
+        max_degree = degree.max() + 1e-6
+        return degree / max_degree
+
+    def _build_dynamic_adjacency(self, features: torch.Tensor) -> torch.Tensor:
         """
-        feats: [B, S, D] -> returns binary [S, S] adjacency with
-        temperature, EMA smoothing, edge/head dropout, quantile selection,
-        degree prior, hysteresis, and warmup union.
+        features: [B, N, D] -> returns binary [N, N] adjacency.
         """
-        B, S, D = feats.shape
-        _, mix_alpha_curr = self._schedule()
+        _, num_nodes, _ = features.shape
+        mix_alpha = self._current_graph_mix()
 
-        # 1) GAT logits (multi-head) — VECTORIZED over all heads
-        h = F.normalize(feats, dim=-1)
-        q = self.gat_q(h)
-        k = self.gat_k(h)
-        qi = q.unsqueeze(2).expand(-1, -1, S, -1)
-        kj = k.unsqueeze(1).expand(-1, S, -1, -1)
-        pair = torch.cat([qi, kj], dim=-1)  # [B, S, S, 2D]
+        normalized_features = F.normalize(features, dim=-1)
+        query = self.gat_q(normalized_features)
+        key = self.gat_k(normalized_features)
 
-        # Batched attention: einsum over all H heads at once
-        # gat_a: [H, 2D, 1] → squeeze to [H, 2D]
-        # pair: [B, S, S, 2D]
-        # result: [B, H, S, S]
-        logits_all = torch.einsum('bijd,hd->bhij', pair, self.gat_a.squeeze(-1))
+        query_i = query.unsqueeze(2).expand(-1, -1, num_nodes, -1)
+        key_j = key.unsqueeze(1).expand(-1, num_nodes, -1, -1)
+        pair_features = torch.cat([query_i, key_j], dim=-1)
+
+        logits_all = torch.einsum("bijd,hd->bhij", pair_features, self.gat_a.squeeze(-1))
         logits_all = F.leaky_relu(logits_all, self.leaky_slope)
 
-        # Head dropout: mask out entire heads during training
         if self.training and self.head_dropout > 0:
-            H = logits_all.size(1)
-            head_mask = (torch.rand(H, device=logits_all.device) >= self.head_dropout).float()
-            # Ensure at least one head survives
+            num_heads = logits_all.size(1)
+            head_mask = (torch.rand(num_heads, device=logits_all.device) >= self.head_dropout).float()
             if head_mask.sum() == 0:
                 head_mask[0] = 1.0
-            head_mask = head_mask.view(1, H, 1, 1)
+            head_mask = head_mask.view(1, num_heads, 1, 1)
             logits_all = logits_all * head_mask
             logits = logits_all.sum(dim=1) / head_mask.sum()
         else:
             logits = logits_all.mean(dim=1)
 
         logits = logits / max(self.gat_tau, 1e-6)
-        A_prob = torch.softmax(logits, dim=-1)
+        adjacency_prob = torch.softmax(logits, dim=-1)
 
-        # 2) EMA smoothing
-        A_mean = A_prob.mean(dim=0).detach()
-        self.ema_A = self.ema_m * self.ema_A + (1.0 - self.ema_m) * A_mean
+        mean_adjacency = adjacency_prob.mean(dim=0).detach()
+        self.ema_A = self.ema_m * self.ema_A + (1.0 - self.ema_m) * mean_adjacency
 
-        fixed = (self.adj_mx > 0).float()
-        fixed = fixed / (fixed.sum(-1, keepdim=True) + self.eps)
-        A_blend = (1.0 - mix_alpha_curr) * self.ema_A + mix_alpha_curr * fixed
+        fixed_adjacency = (self.adj_mx > 0).float()
+        fixed_adjacency = fixed_adjacency / (fixed_adjacency.sum(-1, keepdim=True) + self.eps)
+        adjacency_scores = (1.0 - mix_alpha) * self.ema_A + mix_alpha * fixed_adjacency
 
-        # 4) edge dropout
         if self.training and self.edge_dropout > 0:
-            keep = (torch.rand_like(A_blend) > self.edge_dropout).float()
-            A_blend = A_blend * keep
+            keep_mask = (torch.rand_like(adjacency_scores) > self.edge_dropout).float()
+            adjacency_scores = adjacency_scores * keep_mask
 
-        # 5) degree prior
-        prior = self._degree_prior(A_blend)
-        A_blend = A_blend * (0.8 + 0.2 * prior)
+        degree_prior = self._compute_degree_prior(adjacency_scores)
+        adjacency_scores = adjacency_scores * (0.8 + 0.2 * degree_prior)
 
-        # 6) ADAPTIVE DENSITY (quantile)
-        A_work = A_blend.clone()
-        A_work.fill_diagonal_(0.0)
-        p = float(self.p_keep)
-        p = min(max(p, 1e-3), 0.99)
-        thresh = torch.quantile(A_work, 1.0 - p, dim=-1, keepdim=True)
-        A_bin = (A_work >= thresh).float()
+        working_scores = adjacency_scores.clone()
+        working_scores.fill_diagonal_(0.0)
 
-        # 7) self-loops; symmetrize
-        A_bin.fill_diagonal_(1.0)
+        keep_ratio = min(max(float(self.p_keep), 1e-3), 0.99)
+        threshold = torch.quantile(working_scores, 1.0 - keep_ratio, dim=-1, keepdim=True)
+        adjacency_binary = (working_scores >= threshold).float()
+
+        adjacency_binary.fill_diagonal_(1.0)
         if self.symmetrize:
-            A_bin = torch.maximum(A_bin, A_bin.t())
+            adjacency_binary = torch.maximum(adjacency_binary, adjacency_binary.t())
 
-        # 8) HYSTERESIS
-        row_mean = A_work.mean(dim=-1, keepdim=True)
-        low_mask = (A_work < (row_mean * self.hysteresis_ratio)).float()
-        keep_prev = self.prev_A * (1.0 - low_mask)
-        A_bin = torch.clamp(A_bin + keep_prev, 0.0, 1.0)
-        self.prev_A = A_bin.detach()
+        row_mean = working_scores.mean(dim=-1, keepdim=True)
+        low_confidence_mask = (working_scores < (row_mean * self.hysteresis_ratio)).float()
+        keep_previous_edges = self.prev_A * (1.0 - low_confidence_mask)
+        adjacency_binary = torch.clamp(adjacency_binary + keep_previous_edges, 0.0, 1.0)
+        self.prev_A = adjacency_binary.detach()
 
-        # 9) warmup: union with fixed graph
         self.global_step += 1
         if self.global_step.item() < self.warmup_steps:
-            A_bin = torch.maximum(A_bin, (self.adj_mx > 0).float())
+            adjacency_binary = torch.maximum(adjacency_binary, (self.adj_mx > 0).float())
 
-        return A_bin
+        return adjacency_binary
 
-    def forward(self, x_in):
-        # x_in: [B, T, N, F] (Mode data + Time features)
-        x_in = self._to_BTSF(x_in)
-        B, T, S, Fdim = x_in.shape
-        data = x_in.permute(0, 3, 2, 1)  # [B, F, S, T]
-        
-        # Embeddings
-        tem_emb = self.Temb(x_in)
-        node_emb = self.node_emb.unsqueeze(0).expand(B, -1, -1).transpose(1, 2).unsqueeze(-1)
-        
-        input_data = data.transpose(1, 2).contiguous().view(B, S, -1).transpose(1, 2).unsqueeze(-1)
-        input_data = self.start_conv(input_data)
-        
-        data_st = torch.cat([input_data, tem_emb, node_emb], dim=1)
-        data_st = self.in_layer(data_st)
-        data_st = F.leaky_relu(data_st).permute(0, 2, 1, 3).squeeze(-1)
-        data_st = self.feat_norm(data_st)
-        
-        # Temporal Guidance
-        t_feats = self._temporal_ms_feats(x_in)
-        gate = torch.sigmoid(self.tgate(self.feat_norm(t_feats)))
-        data_st_fused = data_st + gate * t_feats
-        
-        # Graph
+    def forward(self, x_in: torch.Tensor):
+        x_in = self._ensure_btsf_layout(x_in)
+        batch_size, _, num_nodes, _ = x_in.shape
+        input_by_channel = x_in.permute(0, 3, 2, 1)
+
+        temporal_embedding = self.temporal_embedding(x_in)
+        node_embedding = (
+            self.node_emb.unsqueeze(0).expand(batch_size, -1, -1).transpose(1, 2).unsqueeze(-1)
+        )
+
+        flattened_input = (
+            input_by_channel.transpose(1, 2)
+            .contiguous()
+            .view(batch_size, num_nodes, -1)
+            .transpose(1, 2)
+            .unsqueeze(-1)
+        )
+        flattened_input = self.start_conv(flattened_input)
+
+        spatiotemporal_features = torch.cat([flattened_input, temporal_embedding, node_embedding], dim=1)
+        spatiotemporal_features = self.input_projection(spatiotemporal_features)
+        spatiotemporal_features = F.leaky_relu(spatiotemporal_features).permute(0, 2, 1, 3).squeeze(-1)
+        spatiotemporal_features = self.feature_norm(spatiotemporal_features)
+
+        temporal_features = self._compute_temporal_multiscale_features(x_in)
+        temporal_gate = torch.sigmoid(self.temporal_gate(self.feature_norm(temporal_features)))
+        fused_features = spatiotemporal_features + temporal_gate * temporal_features
+
         if self.use_dynamic_graph:
-            adj = self._build_adjacency(data_st_fused)
+            adjacency = self._build_dynamic_adjacency(fused_features)
         else:
-            adj = self.adj_mx
-            
-        # GPT
-        out = self.gpt(data_st_fused, adj)
-        
-        # Project
-        out = out.permute(0, 2, 1).unsqueeze(-1)
-        pred = self.regression_layer(out)
-        
-        return pred, adj
+            adjacency = self.adj_mx
+
+        backbone_output = self.backbone(fused_features, adjacency)
+        prediction = self.regression_layer(backbone_output.permute(0, 2, 1).unsqueeze(-1))
+        return prediction, adjacency
 
 
 class DGLLM(nn.Module):
-    def __init__(self, device, adj_mx, input_dim=3, num_nodes=266, 
-                 input_len=12, output_len=12, llm_layer=6, U=1, 
-                 vmd_K=3, use_attention_fusion=True):
+    def __init__(
+        self,
+        device,
+        adj_mx,
+        input_dim=3,
+        num_nodes=266,
+        input_len=12,
+        output_len=12,
+        llm_layer=6,
+        U=1,
+        vmd_K=3,
+        use_attention_fusion=True,
+    ):
         super().__init__()
-        self.vmd_K = vmd_K
         self.use_attention_fusion = use_attention_fusion
-        self.output_len = output_len
-        
-        # Create a Dynamic Graph ST-LLM for each mode
-        self.mode_models = nn.ModuleList([
-            ModeProcessor(
-                device, adj_mx, input_dim, num_nodes, input_len, output_len, 
-                llm_layer, U, use_dynamic_graph=True
-            ) for _ in range(vmd_K)
-        ])
-        
-        # Fusion Layers
+
+        self.mode_models = nn.ModuleList(
+            [
+                ModeProcessor(
+                    device,
+                    adj_mx,
+                    input_dim,
+                    num_nodes,
+                    input_len,
+                    output_len,
+                    llm_layer,
+                    U,
+                    use_dynamic_graph=True,
+                )
+                for _ in range(vmd_K)
+            ]
+        )
+
         if use_attention_fusion:
             self.fusion_query = nn.Linear(output_len, output_len)
             self.fusion_key = nn.Linear(output_len, output_len)
-            self.fusion_value = nn.Linear(output_len, output_len)
         else:
             self.mode_weights = nn.Parameter(torch.ones(vmd_K) / vmd_K)
-            
-        # Residual connection from original input (trend preservation)
+
         self.residual_proj = nn.Sequential(
             nn.Linear(input_len, output_len),
             nn.LayerNorm(output_len),
-            nn.ReLU()
+            nn.ReLU(),
         )
 
-    def attention_fusion(self, mode_preds):
-        # mode_preds: List of [B, Out_T, N, 1]
-        stacked = torch.stack(mode_preds, dim=0)  # [K, B, T, N, 1]
-        K, B, T, N, _ = stacked.shape
-        x = stacked.squeeze(-1).permute(0, 1, 3, 2).reshape(K, B * N, T)
-        
-        q = self.fusion_query(x)
-        k = self.fusion_key(x)
-        v = self.fusion_value(x)
-        
-        attn = F.softmax(torch.matmul(q, k.transpose(1, 2)) / math.sqrt(T), dim=0)
-        scores = torch.mean(torch.matmul(q, k.transpose(1, 2)), dim=-1)
-        weights = F.softmax(scores, dim=0).unsqueeze(-1).unsqueeze(1).view(K, B, 1, N, 1)
-        
-        fused = torch.sum(weights * stacked, dim=0)
-        return fused
+    def _fuse_mode_predictions(self, mode_predictions):
+        stacked_predictions = torch.stack(mode_predictions, dim=0)  # [K, B, T, N, 1]
+        num_modes, batch_size, output_len, num_nodes, _ = stacked_predictions.shape
+
+        mode_features = (
+            stacked_predictions.squeeze(-1).permute(0, 1, 3, 2).reshape(num_modes, batch_size * num_nodes, output_len)
+        )
+        query = self.fusion_query(mode_features)
+        key = self.fusion_key(mode_features)
+
+        scores = torch.matmul(query, key.transpose(1, 2)).mean(dim=-1)
+        weights = F.softmax(scores, dim=0).unsqueeze(-1).unsqueeze(1).view(num_modes, batch_size, 1, num_nodes, 1)
+        return torch.sum(weights * stacked_predictions, dim=0)
 
     def forward(self, vmd_data, original_input):
         """
-        vmd_data: [B, K, T, N, 1] (Just the flow)
-        original_input: [B, T, N, F] (Flow, Day, Week)
+        vmd_data: [B, K, T, N, 1]
+        original_input: [B, T, N, F]
         """
-        B, K, T, N, _ = vmd_data.shape
-        time_feats = original_input[..., 1:]
-        
-        preds = []
-        graphs = []
-        
-        for k in range(K):
-            mode_flow = vmd_data[:, k, ...]
-            mode_in = torch.cat([mode_flow, time_feats], dim=-1)
-            
-            p, g = self.mode_models[k](mode_in)
-            preds.append(p)
-            graphs.append(g)
-            
+        _, num_modes, _, _, _ = vmd_data.shape
+        time_features = original_input[..., 1:]
+
+        mode_predictions = []
+        learned_graphs = []
+        for mode_index in range(num_modes):
+            mode_flow = vmd_data[:, mode_index, ...]
+            mode_input = torch.cat([mode_flow, time_features], dim=-1)
+
+            prediction, adjacency = self.mode_models[mode_index](mode_input)
+            mode_predictions.append(prediction)
+            learned_graphs.append(adjacency)
+
         if self.use_attention_fusion:
-            final = self.attention_fusion(preds)
+            final_prediction = self._fuse_mode_predictions(mode_predictions)
         else:
-            w = F.softmax(self.mode_weights, dim=0)
-            final = sum(preds[i] * w[i] for i in range(K))
-            
-        # Residual
-        res = original_input[..., 0].permute(0, 2, 1)
-        res = self.residual_proj(res).permute(0, 2, 1).unsqueeze(-1)
-        final = final + 0.1 * res
-        
-        return final, graphs
+            mode_weights = F.softmax(self.mode_weights, dim=0)
+            final_prediction = sum(
+                mode_predictions[mode_index] * mode_weights[mode_index]
+                for mode_index in range(num_modes)
+            )
+
+        residual = original_input[..., 0].permute(0, 2, 1)
+        residual = self.residual_proj(residual).permute(0, 2, 1).unsqueeze(-1)
+        final_prediction = final_prediction + 0.1 * residual
+
+        return final_prediction, learned_graphs
 
     def param_num(self):
         return sum(p.numel() for p in self.parameters())
