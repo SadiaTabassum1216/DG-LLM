@@ -2,7 +2,22 @@ import torch
 import numpy as np
 import pickle
 import math
+import os
+import random
 from torch.optim.optimizer import Optimizer
+
+
+def seed_everything(seed: int = 42) -> None:
+    """Set all random seeds for reproducibility."""
+    random.seed(seed)
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
 
 def load_pickle(pickle_file):
     """Load a pickle file with fallback for different encodings."""

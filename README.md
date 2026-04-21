@@ -35,13 +35,6 @@ Traffic forecasting plays a critical role in the field of urban planning. Yet, e
    python main.py
    ```
 
-4. **Run Analysis**:
-
-   ```bash
-   python -m analysis.zero_shot_transfer --source_data PEMSD04 --target_data PEMSD08
-   python -m analysis.analyze_zero_shot_results
-   ```
-
 ## Dataset Download
 
 The datasets are available on Google Drive: **[Datasets](https://drive.google.com/file/d/19LkZXBCS7E2SCuM2ZQ7YKT7L0-wMXrJa/view?usp=sharing)**
