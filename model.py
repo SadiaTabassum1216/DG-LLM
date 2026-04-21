@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 from temporal_embedding import TemporalEmbedding
-from backbone import PFA
+from backbone import GraphAwareGPTBackbone
 
 
 class ModeProcessor(nn.Module):
@@ -95,7 +95,7 @@ class ModeProcessor(nn.Module):
         self.tgate = nn.Linear(to_gpt_channel, to_gpt_channel)
         
         # Backbone
-        self.gpt = PFA(device, gpt_layers=llm_layer, U=U, dropout_rate=0.1)
+        self.gpt = GraphAwareGPTBackbone(device, gpt_layers=llm_layer, U=U, dropout_rate=0.1)
         self.regression_layer = nn.Conv2d(to_gpt_channel, output_len, kernel_size=(1, 1))
 
     def _schedule(self):
