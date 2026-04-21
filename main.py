@@ -6,7 +6,7 @@ import json
 import time
 from tqdm import tqdm
 from data_loader import load_dataset_optimized
-from trainer import VMD_Trainer, test_model
+from trainer import Trainer
 from visualization import plot_predictions_vs_ground_truth, validate_temporal_features, plot_error_diagnostics, plot_weekly_1step_ahead_predictions
 from utils import load_pickle, seed_everything
 from paths import DATASET_DIR, RESULTS_LOGS_DIR
@@ -130,7 +130,7 @@ def main():
 
     # 3. Train model
     print("\n>> Initializing Model...")
-    trainer = VMD_Trainer(args, data['scaler'], adj_mx, args.device)
+    trainer = Trainer(args, data['scaler'], adj_mx, args.device)
     print(f"   Total parameters: {trainer.model.param_num():,}")
 
     # Check for existing checkpoint
@@ -156,12 +156,23 @@ def main():
             epoch_loss = []
             epoch_metrics = []
             
-            for x, y, vmd in data['train_loader'].get_iterator():
+            train_loader = data['train_loader']
+            num_train_batches = len(train_loader)
+
+            for batch_idx, (x, y, vmd) in enumerate(train_loader.get_iterator()):
                 tx = x.to(args.device, non_blocking=True).transpose(1, 3)
                 ty = y.to(args.device, non_blocking=True).transpose(1, 3)[:, 0, :, :]
                 tvmd = vmd.to(args.device, non_blocking=True)
-                
-                loss, metrics = trainer.train_step(tx, ty, tvmd)
+
+                accumulation_step = batch_idx % trainer.grad_accum_steps
+                is_last_batch = batch_idx == num_train_batches - 1
+                loss, metrics = trainer.train_step(
+                    tx,
+                    ty,
+                    tvmd,
+                    accumulation_step=accumulation_step,
+                    is_last_batch=is_last_batch,
+                )
                 epoch_loss.append(loss)
                 epoch_metrics.append(metrics)
             
@@ -233,7 +244,7 @@ def main():
 
     # Load model once
     print(f"\n>> Loading model from {model_path}...")
-    trainer.model.load_state_dict(torch.load(model_path, weights_only=False))
+    trainer.load_model(model_path, strict=False)
     trainer.model.eval()
 
     # Testing and Visualization
@@ -290,7 +301,7 @@ def main():
         print("\n" + "="*60)
         print("  TESTING BEST MODEL")
         print("="*60)
-        test_results = test_model(trainer, data, args.device, model_path)
+        test_results = trainer.test_model(data['test_loader'])
         test_mae = test_results['mae']
         test_rmse = test_results['rmse']
         test_mape = test_results['mape']

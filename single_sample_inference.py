@@ -23,7 +23,7 @@ import os
 import time
 from types import SimpleNamespace
 
-from trainer import VMD_Trainer
+from trainer import Trainer
 from utils import StandardScaler, MAE_torch, RMSE_torch, MAPE_torch, load_pickle
 from vmd_utils import decompose_single_window
 from paths import DATASET_DIR, MODELS_DIR, RESULTS_FIGURES_DIR, RESULTS_LOGS_DIR
@@ -245,7 +245,7 @@ def main():
         batch_size=1,
     )
 
-    trainer = VMD_Trainer(runtime_args, scaler, adj_mx, args.device)
+    trainer = Trainer(runtime_args, scaler, adj_mx, args.device)
     load_model_weights(trainer, args.model_path, args.device)
     trainer.model.eval()
     print(f"   Model loaded ({trainer.model.param_num():,} parameters)")
