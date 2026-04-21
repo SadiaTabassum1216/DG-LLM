@@ -16,51 +16,10 @@ Raw data format expected:
 import numpy as np
 import os
 import argparse
-from typing import Tuple
+from utils import create_sliding_windows
 
 
-def create_sliding_windows(
-    data: np.ndarray, 
-    input_len: int = 12, 
-    output_len: int = 12
-) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Create sliding window samples from time series data.
-    
-    Args:
-        data: Raw traffic data [total_timesteps, num_nodes, features]
-        input_len: Number of historical timesteps for input
-        output_len: Number of future timesteps to predict
-        
-    Returns:
-        x: Input sequences [num_samples, input_len, num_nodes, features]
-        y: Target sequences [num_samples, output_len, num_nodes, 1]
-    """
-    total_len = input_len + output_len
-    num_samples = data.shape[0] - total_len + 1
-    
-    if num_samples <= 0:
-        raise ValueError(
-            f"Data has {data.shape[0]} timesteps, but need at least {total_len} "
-            f"(input_len={input_len} + output_len={output_len})"
-        )
-    
-    x_list = []
-    y_list = []
-    
-    for i in range(num_samples):
-        # Input: all features
-        x_list.append(data[i : i + input_len])
-        # Target: only the first feature (traffic flow/demand)
-        y_list.append(data[i + input_len : i + total_len, :, 0:1])
-    
-    x = np.array(x_list, dtype=np.float32)
-    y = np.array(y_list, dtype=np.float32)
-    
-    return x, y
-
-
-def split_data(
+def split_data_chronologically(
     x: np.ndarray, 
     y: np.ndarray, 
     train_ratio: float = 0.6,
@@ -105,7 +64,7 @@ def split_data(
     return splits
 
 
-def load_raw_data(data_path: str) -> np.ndarray:
+def load_raw_traffic_data(data_path: str) -> np.ndarray:
     """
     Load raw traffic data from various formats.
     
@@ -179,7 +138,7 @@ def preprocess_dataset(
     
     # Load raw data
     print(f"\n1. Loading raw data from: {raw_data_path}")
-    data = load_raw_data(raw_data_path)
+    data = load_raw_traffic_data(raw_data_path)
     print(f"   Raw data shape: {data.shape}")
     print(f"   - Total timesteps: {data.shape[0]}")
     print(f"   - Number of nodes: {data.shape[1]}")
@@ -199,7 +158,7 @@ def preprocess_dataset(
     print(f"   - Train: {train_ratio*100:.0f}%")
     print(f"   - Val: {val_ratio*100:.0f}%")
     print(f"   - Test: {test_ratio*100:.0f}%")
-    splits = split_data(x, y, train_ratio, val_ratio, test_ratio)
+    splits = split_data_chronologically(x, y, train_ratio, val_ratio, test_ratio)
     
     for split_name, split_data in splits.items():
         print(f"   {split_name}: {split_data['x'].shape[0]} samples")

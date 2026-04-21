@@ -3,7 +3,7 @@ import torch.nn as nn
 import numpy as np
 import os
 from tqdm import tqdm
-from utils import Ranger, MAE_torch, MAPE_torch, RMSE_torch, metric
+from utils import Ranger, MAE_torch, MAPE_torch, RMSE_torch, compute_metrics
 
 
 class VMD_Trainer:
@@ -122,7 +122,7 @@ class VMD_Trainer:
                 self.optimizer.step()
         
         # Return denormalized loss for logging
-        return (loss.item() * self.grad_accum_steps), metric(preds_scaled, real_scaled)
+        return (loss.item() * self.grad_accum_steps), compute_metrics(preds_scaled, real_scaled)
 
     def eval_step(self, x, y_real, vmd_data):
         """
@@ -142,7 +142,7 @@ class VMD_Trainer:
         real_scaled = torch.unsqueeze(y_real, 1)
         
         loss = self.loss_fn(preds_scaled, real_scaled, 0.0).item()
-        metrics = metric(preds_scaled, real_scaled)
+        metrics = compute_metrics(preds_scaled, real_scaled)
         
         return loss, metrics
 

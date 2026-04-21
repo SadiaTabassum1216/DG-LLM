@@ -1,3 +1,15 @@
+"""
+Visualization utilities for DG-LLM model predictions and diagnostics.
+
+This module provides functions for visualizing:
+- Model predictions vs ground truth
+- Error distributions and prediction accuracy
+- Temporal patterns across multiple days
+- Temporal features (time-of-day, day-of-week)
+
+All visualizations are saved as PNG files to the specified directory.
+"""
+
 import matplotlib.pyplot as plt
 import seaborn as sns
 import torch
@@ -6,8 +18,30 @@ import os
 from paths import RESULTS_LOGS_DIR
 
 
-def visualize_model_predictions(preds, reals, node_idx=0, horizon_idx=0, num_samples=288, save_dir=None):
-    """Compare Predicted vs Real values for a specific node and horizon."""
+def plot_predictions_vs_ground_truth(preds, reals, node_idx=0, horizon_idx=0, num_samples=288, save_dir=None):
+    """
+    Plot predictions vs ground truth for a specific node and prediction horizon.
+    
+    Generates a line plot comparing model predictions with actual values for a single
+    node across a specified number of samples. Useful for visually inspecting prediction
+    quality and identifying systematic errors.
+    
+    Args:
+        preds (torch.Tensor): Predicted values, shape [num_samples, output_len, num_nodes, 1]
+        reals (torch.Tensor): Ground truth values, shape [num_samples, output_len, num_nodes, 1]
+        node_idx (int, optional): Node index to visualize. Default: 0
+        horizon_idx (int, optional): Prediction horizon index (0 = 1-step ahead). Default: 0
+        num_samples (int, optional): Number of samples to plot. Default: 288 (one day)
+        save_dir (str, optional): Directory to save the plot. Uses RESULTS_LOGS_DIR if None.
+    
+    Returns:
+        str: Path to the saved PNG file
+        
+    Example:
+        >>> preds = torch.randn(500, 12, 307, 1)  # [samples, horizons, nodes, features]
+        >>> reals = torch.randn(500, 12, 307, 1)
+        >>> path = plot_predictions_vs_ground_truth(preds, reals, node_idx=10, horizon_idx=0)
+    """
     save_dir = save_dir or str(RESULTS_LOGS_DIR)
     os.makedirs(save_dir, exist_ok=True)
     plt.figure(figsize=(15, 5))
@@ -22,8 +56,30 @@ def visualize_model_predictions(preds, reals, node_idx=0, horizon_idx=0, num_sam
     print(f"  Saved: {save_path}")
     return save_path
 
-def visualize_advanced_diagnostics(preds, reals, node_idx=0, save_dir=None):
-    """Plot Error Distribution and Prediction vs Truth Scatter."""
+
+def plot_error_diagnostics(preds, reals, node_idx=0, save_dir=None):
+    """
+    Generate diagnostic plots for prediction error analysis.
+    
+    Creates a 2-subplot figure showing:
+    1. Error distribution histogram with KDE curve for residual analysis
+    2. Scatter plot of predictions vs ground truth with perfect prediction line
+    
+    Useful for identifying prediction bias, error magnitude, and systematic deviations
+    from the true values.
+    
+    Args:
+        preds (torch.Tensor): Predicted values, shape [num_samples, output_len, num_nodes, 1]
+        reals (torch.Tensor): Ground truth values, shape [num_samples, output_len, num_nodes, 1]
+        node_idx (int, optional): Node index to analyze. Default: 0
+        save_dir (str, optional): Directory to save the plot. Uses RESULTS_LOGS_DIR if None.
+    
+    Returns:
+        str: Path to the saved PNG file
+        
+    Example:
+        >>> path = plot_error_diagnostics(preds, reals, node_idx=5)
+    """
     save_dir = save_dir or str(RESULTS_LOGS_DIR)
     os.makedirs(save_dir, exist_ok=True)
     p = preds[:, 0, node_idx, 0].cpu().numpy()
@@ -50,8 +106,27 @@ def visualize_advanced_diagnostics(preds, reals, node_idx=0, save_dir=None):
     print(f"  Saved: {save_path}")
     return save_path
 
-def visualize_weekly_horizon1(preds, reals, node_idx=0, save_dir=None):
-    """Zoomed in view of 1-week of forecasts."""
+
+def plot_weekly_1step_ahead_predictions(preds, reals, node_idx=0, save_dir=None):
+    """
+    Plot a full week (7 days) of 1-step ahead predictions.
+    
+    Creates a zoomed-in view of the first prediction horizon (1-step ahead) over
+    one week of data (2016 timesteps = 288 steps/day × 7 days). Useful for observing
+    long-term temporal patterns and weekly cycles in traffic data.
+    
+    Args:
+        preds (torch.Tensor): Predicted values, shape [num_samples, output_len, num_nodes, 1]
+        reals (torch.Tensor): Ground truth values, shape [num_samples, output_len, num_nodes, 1]
+        node_idx (int, optional): Node index to visualize. Default: 0
+        save_dir (str, optional): Directory to save the plot. Uses RESULTS_LOGS_DIR if None.
+    
+    Returns:
+        str: Path to the saved PNG file
+        
+    Example:
+        >>> path = plot_weekly_1step_ahead_predictions(preds, reals, node_idx=0)
+    """
     save_dir = save_dir or str(RESULTS_LOGS_DIR)
     os.makedirs(save_dir, exist_ok=True)
     # 288 steps/day * 7 days = 2016 steps
@@ -67,8 +142,34 @@ def visualize_weekly_horizon1(preds, reals, node_idx=0, save_dir=None):
     print(f"  Saved: {save_path}")
     return save_path
 
-def verify_temporal_features(data_loader):
-    """Sanity check for TOD and DOW features."""
+
+def validate_temporal_features(data_loader):
+    """
+    Validate and visualize temporal features (Time-of-Day and Day-of-Week).
+    
+    Validates temporal feature values by plotting the first sample's Time-of-Day (ToD)
+    and Day-of-Week (DoW) sequences. Ensures that temporal embeddings are correctly
+    computed and within expected ranges.
+    
+    Expected ranges:
+    - ToD: [0, 1] (normalized over 288 timesteps per day)
+    - DoW: [0, 6] (7 days per week)
+    
+    Args:
+        data_loader: Data loader with get_iterator() method that yields (x, y, vmd)
+                    where x shape is [batch_size, seq_len, num_nodes, features]
+    
+    Returns:
+        None (prints feature statistics and displays plot)
+        
+    Raises:
+        Assertion errors if features are outside expected ranges.
+        
+    Example:
+        >>> from data_loader import load_dataset_optimized
+        >>> data = load_dataset_optimized(data_path, batch_size=8, args)
+        >>> validate_temporal_features(data['train_loader'])
+    """
     x, y, vmd = next(data_loader.get_iterator())
     
     # Handle both numpy and torch

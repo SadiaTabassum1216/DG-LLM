@@ -72,13 +72,48 @@ def WMAPE_torch(pred, true, mask_value=None):
     loss = torch.sum(torch.abs(pred - true)) / torch.sum(torch.abs(true))
     return loss
 
-def metric(pred, real):
+def compute_metrics(pred, real):
     """Calculate aggregate metrics: MAE, MAPE, RMSE, WMAPE."""
     mae = MAE_torch(pred, real, 0).item()
     mape = MAPE_torch(pred, real, 0).item()
     wmape = WMAPE_torch(pred, real, 0).item()
     rmse = RMSE_torch(pred, real, 0).item()
     return mae, mape, rmse, wmape
+
+def create_sliding_windows(raw_data: np.ndarray, input_len: int, output_len: int):
+    """
+    Create sliding window samples from raw time series data.
+    
+    Args:
+        raw_data: Raw traffic data [total_timesteps, num_nodes, features]
+        input_len: Number of historical timesteps for input
+        output_len: Number of future timesteps to predict
+        
+    Returns:
+        x: Input sequences [num_samples, input_len, num_nodes, features]
+        y: Target sequences [num_samples, output_len, num_nodes, 1]
+    """
+    total_len = input_len + output_len
+    num_samples = raw_data.shape[0] - total_len + 1
+    
+    if num_samples <= 0:
+        raise ValueError(
+            f"Insufficient data: {raw_data.shape[0]} timesteps, "
+            f"need at least {total_len} (input={input_len} + output={output_len})"
+        )
+    
+    x_list = []
+    y_list = []
+    
+    for i in range(num_samples):
+        x_list.append(raw_data[i : i + input_len])
+        # Target: only first feature (flow/demand)
+        y_list.append(raw_data[i + input_len : i + total_len, :, 0:1])
+    
+    x = np.stack(x_list, axis=0).astype(np.float32)
+    y = np.stack(y_list, axis=0).astype(np.float32)
+    
+    return x, y
 
 class Ranger(Optimizer):
     """Ranger optimizer (RAdam + LookAhead + Gradient Centralization)."""

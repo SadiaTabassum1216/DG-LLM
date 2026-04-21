@@ -7,7 +7,7 @@ import time
 from tqdm import tqdm
 from data_loader import load_dataset_optimized
 from trainer import VMD_Trainer, test_model
-from visualization import visualize_model_predictions, verify_temporal_features, visualize_advanced_diagnostics, visualize_weekly_horizon1
+from visualization import plot_predictions_vs_ground_truth, validate_temporal_features, plot_error_diagnostics, plot_weekly_1step_ahead_predictions
 from utils import load_pickle, seed_everything
 from paths import DATASET_DIR, RESULTS_LOGS_DIR
 
@@ -111,7 +111,7 @@ def main():
     data = load_dataset_optimized(args.data_path, args.batch_size, args)
     
     # Sanity check
-    verify_temporal_features(data['train_loader'])
+    validate_temporal_features(data['train_loader'])
 
     # 2. Load Adjacency Matrix
     adj_path = os.path.join(args.root_path, args.data, 'adj_mx.pkl')
@@ -282,14 +282,9 @@ def main():
         print(f"   Predictions shape: {preds.shape}")
         print(f"   Ground truth shape: {reals.shape}")
         
-        visualize_model_predictions(preds, reals, node_idx=0, horizon_idx=0, save_dir=args.log_dir)
-        visualize_advanced_diagnostics(preds, reals, node_idx=0, save_dir=args.log_dir)
-        visualize_weekly_horizon1(preds, reals, node_idx=0, save_dir=args.log_dir)
-        
-        print(f"\n Visualizations saved to {args.log_dir}")
-        print("  - predictions_node0_h0.png")
-        print("  - diagnostics_node0.png")
-        print("  - weekly_node0.png")
+        plot_predictions_vs_ground_truth(preds, reals, node_idx=0, horizon_idx=0, save_dir=args.log_dir)
+        plot_error_diagnostics(preds, reals, node_idx=0, save_dir=args.log_dir)
+        plot_weekly_1step_ahead_predictions(preds, reals, node_idx=0, save_dir=args.log_dir)
     else:
         # Just testing, no visualization
         print("\n" + "="*60)
@@ -312,7 +307,7 @@ def main():
     }
     with open(results_path, 'w') as f:
         json.dump(results_to_save, f, indent=2)
-    print(f"\n✓ Results saved to: {results_path}")
+    print(f"\n Results saved to: {results_path}")
 
 
 if __name__ == "__main__":

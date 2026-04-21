@@ -1,12 +1,12 @@
 import torch
 import numpy as np
 import os
-from utils import StandardScaler
+from utils import StandardScaler, create_sliding_windows
 from vmd_utils import precompute_vmd
 
 
-def _ensure_writable_dir(preferred_dir, dataset_name):
-    """Return a writable cache directory, falling back when preferred is read-only."""
+def _get_writable_dir(preferred_dir, dataset_name):
+    """Get a writable cache directory, trying fallbacks if preferred is read-only."""
     try:
         os.makedirs(preferred_dir, exist_ok=True)
         test_path = os.path.join(preferred_dir, ".write_test")
@@ -67,42 +67,6 @@ def reconstruct_raw_from_windows(x, y, original_input_len=12, original_output_le
     
     raw = np.stack(raw_list, axis=0)
     return raw
-
-
-def create_sliding_windows(raw_data, input_len, output_len):
-    """
-    Create sliding window samples from raw time series.
-    
-    Args:
-        raw_data: [total_timesteps, N, F]
-        input_len: desired input sequence length
-        output_len: desired output sequence length
-        
-    Returns:
-        x: [samples, input_len, N, F]
-        y: [samples, output_len, N, 1]
-    """
-    total_len = input_len + output_len
-    num_samples = raw_data.shape[0] - total_len + 1
-    
-    if num_samples <= 0:
-        raise ValueError(
-            f"Insufficient data: {raw_data.shape[0]} timesteps, "
-            f"need at least {total_len} (input={input_len} + output={output_len})"
-        )
-    
-    x_list = []
-    y_list = []
-    
-    for i in range(num_samples):
-        x_list.append(raw_data[i : i + input_len])
-        # Target: only first feature (flow/demand)
-        y_list.append(raw_data[i + input_len : i + total_len, :, 0:1])
-    
-    x = np.stack(x_list, axis=0).astype(np.float32)
-    y = np.stack(y_list, axis=0).astype(np.float32)
-    
-    return x, y
 
 
 def reprocess_with_new_lengths(dataset_dir, args, original_input_len=12, original_output_len=12):
@@ -173,13 +137,6 @@ class OptimizedDataLoader:
         self.shuffle = shuffle
         self.num_samples = self.data_x.shape[0]
 
-    def __iter__(self):
-        indices = torch.randperm(self.num_samples) if self.shuffle else torch.arange(self.num_samples)
-        
-        for i in range(0, self.num_samples, self.batch_size):
-            batch_indices = indices[i : i + self.batch_size]
-            yield self.data_x[batch_indices], self.data_y[batch_indices], self.vmd_data[batch_indices]
-
     def __len__(self):
         return (self.num_samples + self.batch_size - 1) // self.batch_size
 
@@ -199,7 +156,7 @@ def load_dataset_optimized(dataset_dir, batch_size, args, force_recompute=False)
     """
     # Cache directories - respect explicit args if provided
     preferred_cache_dir = getattr(args, "vmd_cache_dir", "./vmd_cache")
-    output_cache_dir = _ensure_writable_dir(preferred_cache_dir, args.data)
+    output_cache_dir = _get_writable_dir(preferred_cache_dir, args.data)
     input_cache_dir = getattr(args, "vmd_cache_dir", f"./vmd_cache_{args.data}")
     if output_cache_dir != preferred_cache_dir:
         print(f"  [Warning] Cache dir not writable: {preferred_cache_dir}")
@@ -332,7 +289,7 @@ def load_dataset_optimized(dataset_dir, batch_size, args, force_recompute=False)
                 np.save(target_path, vmd_result)
             except OSError:
                 # Last-resort fallback in case the selected cache path becomes unwritable.
-                backup_dir = _ensure_writable_dir(os.path.join(".", "vmd_cache_fallback", args.data), args.data)
+                backup_dir = _get_writable_dir(os.path.join(".", "vmd_cache_fallback", args.data), args.data)
                 backup_path = os.path.join(backup_dir, filename)
                 np.save(backup_path, vmd_result)
                 print(f"  [Warning] Could not save cache to {target_path}. Saved to {backup_path}")
