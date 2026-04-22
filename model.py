@@ -34,6 +34,28 @@ class ModeProcessor(nn.Module):
         k_min=16,
         k_max=28,
     ):
+        """Initialize a single-mode spatio-temporal processing block.
+
+        Args:
+            device: Target torch device.
+            adj_mx: Static adjacency matrix used as graph prior.
+            input_dim: Number of input features per node and time step.
+            num_nodes: Number of graph nodes.
+            input_len: Number of historical time steps.
+            output_len: Forecast horizon.
+            llm_layer: Number of backbone transformer-like layers.
+            U: Backbone expansion factor.
+            use_dynamic_graph: Whether to build a learned adjacency per step.
+            heads: Number of heads for graph attention scoring.
+            tau_hi: Deprecated compatibility arg.
+            tau_lo: Deprecated compatibility arg.
+            p_keep: Fraction of edges to retain after thresholding.
+            min_neighbors: Deprecated compatibility arg.
+            mix_hi: Initial blend weight for fixed adjacency during warmup.
+            mix_lo: Final blend weight for fixed adjacency after warmup.
+            k_min: Deprecated compatibility arg.
+            k_max: Deprecated compatibility arg.
+        """
         super().__init__()
 
         # Preserved in the signature for compatibility with older call sites.
@@ -95,40 +117,64 @@ class ModeProcessor(nn.Module):
         )
         self.regression_layer = nn.Conv2d(backbone_channel, output_len, kernel_size=(1, 1))
 
-    def _ensure_btsf_layout(self, x: torch.Tensor) -> torch.Tensor:
+    def ensure_btnf_layout(self, input_tensor: torch.Tensor) -> torch.Tensor:
         """
-        Normalize inputs to [B, T, N, F].
+        Normalize inputs to [B, T, N, F] layout.
+
+        Accepts legacy [B, F, N, T] and converts it to [B, T, N, F].
         """
-        if x.dim() == 4 and x.shape[1] == self.input_dim:
-            return x.permute(0, 3, 2, 1).contiguous()
-        return x
+        if input_tensor.dim() == 4 and input_tensor.shape[1] == self.input_dim:
+            return input_tensor.permute(0, 3, 2, 1).contiguous()
+        return input_tensor
 
     def _compute_temporal_multiscale_features(self, history_data: torch.Tensor) -> torch.Tensor:
-        batch_size, time_steps, num_nodes, feature_dim = history_data.shape
-        x = history_data.permute(0, 2, 3, 1).reshape(batch_size * num_nodes, feature_dim, time_steps)
+        """Extract pooled multi-scale temporal features for each node.
 
-        branch_1 = F.adaptive_avg_pool1d(F.relu(self.temporal_conv_1(x)), 1).squeeze(-1)
-        branch_3 = F.adaptive_avg_pool1d(F.relu(self.temporal_conv_3(x)), 1).squeeze(-1)
-        branch_5 = F.adaptive_avg_pool1d(F.relu(self.temporal_conv_5(x)), 1).squeeze(-1)
+        Args:
+            history_data: Input tensor in [B, T, N, F].
+
+        Returns:
+            Tensor of shape [B, N, D_backbone].
+        """
+        batch_size, time_steps, num_nodes, feature_dim = history_data.shape
+        temporal_input = history_data.permute(0, 2, 3, 1).reshape(
+            batch_size * num_nodes, feature_dim, time_steps
+        )
+
+        branch_1 = F.adaptive_avg_pool1d(F.relu(self.temporal_conv_1(temporal_input)), 1).squeeze(-1)
+        branch_3 = F.adaptive_avg_pool1d(F.relu(self.temporal_conv_3(temporal_input)), 1).squeeze(-1)
+        branch_5 = F.adaptive_avg_pool1d(F.relu(self.temporal_conv_5(temporal_input)), 1).squeeze(-1)
 
         temporal_features = torch.cat([branch_1, branch_3, branch_5], dim=-1)
         temporal_features = self.temporal_projection(temporal_features)
         return temporal_features.view(batch_size, num_nodes, -1)
 
     def _current_graph_mix(self) -> float:
+        """Return the current fixed-vs-learned graph mixing factor.
+
+        The factor linearly anneals from ``mix_hi`` to ``mix_lo`` over
+        ``warmup_steps`` based on ``global_step``.
+        """
         step = float(self.global_step.item())
         warmup = max(self.warmup_steps, 1)
         progress = min(step / warmup, 1.0)
         return self.mix_hi + (self.mix_lo - self.mix_hi) * progress
 
     def _compute_degree_prior(self, adjacency_scores: torch.Tensor) -> torch.Tensor:
+        """Compute a normalized node-degree prior from soft adjacency scores."""
         degree = adjacency_scores.sum(dim=-1, keepdim=True)
         max_degree = degree.max() + 1e-6
         return degree / max_degree
 
     def _build_dynamic_adjacency(self, features: torch.Tensor) -> torch.Tensor:
         """
-        features: [B, N, D] -> returns binary [N, N] adjacency.
+        Build a binary dynamic adjacency matrix from node features.
+
+        Args:
+            features: Node features in [B, N, D].
+
+        Returns:
+            Binary adjacency matrix in [N, N].
         """
         _, num_nodes, _ = features.shape
         mix_alpha = self._current_graph_mix()
@@ -195,12 +241,21 @@ class ModeProcessor(nn.Module):
 
         return adjacency_binary
 
-    def forward(self, x_in: torch.Tensor):
-        x_in = self._ensure_btsf_layout(x_in)
-        batch_size, _, num_nodes, _ = x_in.shape
-        input_by_channel = x_in.permute(0, 3, 2, 1)
+    def forward(self, input_tensor: torch.Tensor):
+        """Run a forward pass for one VMD mode.
 
-        temporal_embedding = self.temporal_embedding(x_in)
+        Args:
+            input_tensor: Mode-specific input in [B, T, N, F] (or legacy [B, F, N, T]).
+
+        Returns:
+            Tuple ``(prediction, adjacency)`` where prediction is [B, T_out, N, 1]
+            and adjacency is [N, N].
+        """
+        input_tensor = self.ensure_btnf_layout(input_tensor)
+        batch_size, _, num_nodes, _ = input_tensor.shape
+        input_by_channel = input_tensor.permute(0, 3, 2, 1)
+
+        temporal_embedding = self.temporal_embedding(input_tensor)
         node_embedding = (
             self.node_emb.unsqueeze(0).expand(batch_size, -1, -1).transpose(1, 2).unsqueeze(-1)
         )
@@ -219,7 +274,7 @@ class ModeProcessor(nn.Module):
         spatiotemporal_features = F.leaky_relu(spatiotemporal_features).permute(0, 2, 1, 3).squeeze(-1)
         spatiotemporal_features = self.feature_norm(spatiotemporal_features)
 
-        temporal_features = self._compute_temporal_multiscale_features(x_in)
+        temporal_features = self._compute_temporal_multiscale_features(input_tensor)
         temporal_gate = torch.sigmoid(self.temporal_gate(self.feature_norm(temporal_features)))
         fused_features = spatiotemporal_features + temporal_gate * temporal_features
 
@@ -247,6 +302,20 @@ class DGLLM(nn.Module):
         vmd_K=3,
         use_attention_fusion=True,
     ):
+        """Initialize the multi-mode DG-LLM forecasting model.
+
+        Args:
+            device: Target torch device.
+            adj_mx: Static adjacency matrix prior.
+            input_dim: Number of input features per node and time step.
+            num_nodes: Number of graph nodes.
+            input_len: Number of historical time steps.
+            output_len: Forecast horizon.
+            llm_layer: Number of backbone layers in each mode processor.
+            U: Backbone expansion factor.
+            vmd_K: Number of VMD modes.
+            use_attention_fusion: Whether to fuse modes with attention.
+        """
         super().__init__()
         self.use_attention_fusion = use_attention_fusion
 
@@ -279,24 +348,17 @@ class DGLLM(nn.Module):
             nn.ReLU(),
         )
 
-    def _fuse_mode_predictions(self, mode_predictions):
-        stacked_predictions = torch.stack(mode_predictions, dim=0)  # [K, B, T, N, 1]
-        num_modes, batch_size, output_len, num_nodes, _ = stacked_predictions.shape
-
-        mode_features = (
-            stacked_predictions.squeeze(-1).permute(0, 1, 3, 2).reshape(num_modes, batch_size * num_nodes, output_len)
-        )
-        query = self.fusion_query(mode_features)
-        key = self.fusion_key(mode_features)
-
-        scores = torch.matmul(query, key.transpose(1, 2)).mean(dim=-1)
-        weights = F.softmax(scores, dim=0).unsqueeze(-1).unsqueeze(1).view(num_modes, batch_size, 1, num_nodes, 1)
-        return torch.sum(weights * stacked_predictions, dim=0)
-
     def forward(self, vmd_data, original_input):
         """
-        vmd_data: [B, K, T, N, 1]
-        original_input: [B, T, N, F]
+        Run end-to-end prediction across all VMD modes.
+
+        Args:
+            vmd_data: Decomposed mode inputs in [B, K, T, N, 1].
+            original_input: Original input in [B, T, N, F].
+
+        Returns:
+            Tuple ``(final_prediction, learned_graphs)`` where final_prediction is
+            [B, T_out, N, 1] and learned_graphs is a list of [N, N] adjacencies.
         """
         _, num_modes, _, _, _ = vmd_data.shape
         time_features = original_input[..., 1:]
@@ -312,7 +374,7 @@ class DGLLM(nn.Module):
             learned_graphs.append(adjacency)
 
         if self.use_attention_fusion:
-            final_prediction = self._fuse_mode_predictions(mode_predictions)
+            final_prediction = self.fuse_mode_predictions(mode_predictions)
         else:
             mode_weights = F.softmax(self.mode_weights, dim=0)
             final_prediction = sum(
@@ -326,5 +388,30 @@ class DGLLM(nn.Module):
 
         return final_prediction, learned_graphs
 
+    def fuse_mode_predictions(self, mode_predictions):
+        """Fuse per-mode predictions using attention-derived mode weights.
+
+        Args:
+            mode_predictions: List of tensors each with shape [B, T_out, N, 1].
+
+        Returns:
+            Tensor with shape [B, T_out, N, 1].
+        """
+        stacked_predictions = torch.stack(mode_predictions, dim=0)  # [K, B, T, N, 1]
+        num_modes, batch_size, output_len, num_nodes, _ = stacked_predictions.shape
+
+        mode_features = stacked_predictions.squeeze(-1).permute(0, 1, 3, 2).reshape(
+            num_modes, batch_size * num_nodes, output_len
+        )
+        query = self.fusion_query(mode_features)
+        key = self.fusion_key(mode_features)
+
+        scores = torch.matmul(query, key.transpose(1, 2)).mean(dim=-1)
+        weights = F.softmax(scores, dim=0).unsqueeze(-1).unsqueeze(1).view(
+            num_modes, batch_size, 1, num_nodes, 1
+        )
+        return torch.sum(weights * stacked_predictions, dim=0)
+
     def param_num(self):
+        """Return the total number of trainable and non-trainable parameters."""
         return sum(p.numel() for p in self.parameters())

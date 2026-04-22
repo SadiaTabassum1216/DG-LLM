@@ -34,6 +34,33 @@ class GraphBiasGPT2Attention(GPT2Attention):
     GPT-2 attention layer extended with an additive graph bias.
     """
 
+    def _get_cached_causal_bias(
+        self,
+        query_len: int,
+        key_len: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """Return a cached broadcastable causal additive bias.
+
+        The cache key is ``(query_len, key_len, device)`` to avoid recreating
+        equivalent upper-triangular masks at every attention call.
+        """
+        # Cache one broadcastable causal mask per (Tq, Tk, device) tuple so each
+        # layer reuse avoids rebuilding the same upper-triangular mask.
+        cache_key = (query_len, key_len, device)
+        if not hasattr(self, "_cached_causal_bias") or self._cached_causal_bias_key != cache_key:
+            disallowed = torch.triu(
+                torch.ones(query_len, key_len, device=device, dtype=torch.bool),
+                diagonal=1,
+            )
+            bias = torch.zeros((query_len, key_len), device=device, dtype=dtype)
+            bias = bias.masked_fill(disallowed, float("-inf"))
+            self._cached_causal_bias = bias
+            self._cached_causal_bias_key = cache_key
+
+        return self._cached_causal_bias.to(device=device, dtype=dtype).view(1, 1, query_len, key_len)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -47,6 +74,11 @@ class GraphBiasGPT2Attention(GPT2Attention):
         attn_bias: Optional[torch.Tensor] = None,
         **kwargs,
     ):
+        """Run GPT-2 self-attention with optional additive graph bias.
+
+        Args mirror Hugging Face GPT-2 attention for compatibility, with
+        ``attn_bias`` as the project-specific graph-aware additive mask.
+        """
         # This project routes masking through attn_bias rather than the stock
         # Hugging Face mask arguments. The extra parameters remain here so the
         # patched layer is still callable through the usual GPT-2 API surface.
@@ -106,28 +138,6 @@ class GraphBiasGPT2Attention(GPT2Attention):
         attn_output = self.resid_dropout(attn_output)
         return attn_output, present
 
-    def _get_cached_causal_bias(
-        self,
-        query_len: int,
-        key_len: int,
-        device: torch.device,
-        dtype: torch.dtype,
-    ) -> torch.Tensor:
-        # Cache one broadcastable causal mask per (Tq, Tk, device) tuple so each
-        # layer reuse avoids rebuilding the same upper-triangular mask.
-        cache_key = (query_len, key_len, device)
-        if not hasattr(self, "_cached_causal_bias") or self._cached_causal_bias_key != cache_key:
-            disallowed = torch.triu(
-                torch.ones(query_len, key_len, device=device, dtype=torch.bool),
-                diagonal=1,
-            )
-            bias = torch.zeros((query_len, key_len), device=device, dtype=dtype)
-            bias = bias.masked_fill(disallowed, float("-inf"))
-            self._cached_causal_bias = bias
-            self._cached_causal_bias_key = cache_key
-
-        return self._cached_causal_bias.to(device=device, dtype=dtype).view(1, 1, query_len, key_len)
-
 
 class GraphBiasGPT2Block(GPT2Block):
     """
@@ -147,6 +157,7 @@ class GraphBiasGPT2Block(GPT2Block):
         attn_bias: Optional[torch.Tensor] = None,
         **kwargs,
     ):
+        """Run one GPT-2 block and forward graph attention bias to attention."""
         residual = hidden_states
         hidden_states = self.ln_1(hidden_states)
 
@@ -195,6 +206,15 @@ class GraphAwareGPTBackbone(nn.Module):
         dropout_rate: float = 0.0,
         use_gradient_checkpointing: bool = True,
     ):
+        """Initialize GPT-2 backbone with LoRA and optional graph-biased attention.
+
+        Args:
+            device: Kept for API compatibility with existing call sites.
+            gpt_layers: Number of GPT-2 blocks retained from the base model.
+            U: Number of top layers that receive graph bias and remain trainable.
+            dropout_rate: Output and LoRA dropout probability.
+            use_gradient_checkpointing: Whether to checkpoint block forwards.
+        """
         super().__init__()
 
         del device
@@ -209,6 +229,7 @@ class GraphAwareGPTBackbone(nn.Module):
         self._configure_trainable_layers()
 
     def _build_gpt2_backbone(self):
+        """Create a truncated GPT-2 backbone patched with graph-biased attention and LoRA."""
         gpt2 = GPT2Model.from_pretrained(
             "gpt2",
             attn_implementation="eager",
@@ -229,6 +250,11 @@ class GraphAwareGPTBackbone(nn.Module):
         return get_peft_model(gpt2, lora_config)
 
     def _configure_trainable_layers(self) -> None:
+        """Set trainability policy across backbone layers.
+
+        Lower layers keep mostly normalization/positional parameters trainable,
+        while top ``U`` layers remain broadly trainable except MLP weights.
+        """
         total_layers = len(self.gpt2.base_model.model.h)
         top_layer_start = total_layers - self.unfrozen_top_layers
 
@@ -246,6 +272,7 @@ class GraphAwareGPTBackbone(nn.Module):
         output_hidden_states: Optional[bool],
         return_dict: Optional[bool],
     ):
+        """Resolve runtime flags against GPT-2 config defaults."""
         return (
             use_cache if use_cache is not None else gpt2_model.config.use_cache,
             output_hidden_states
@@ -262,6 +289,11 @@ class GraphAwareGPTBackbone(nn.Module):
         past_key_values: Optional[Tuple[Tuple[torch.Tensor]]],
         position_ids: Optional[torch.LongTensor],
     ):
+        """Validate and assemble GPT-2 hidden-state inputs.
+
+        Returns:
+            Tuple of ``(hidden_states, device, past_key_values)``.
+        """
         if input_ids is not None and inputs_embeds is not None:
             raise ValueError("Specify either input_ids or inputs_embeds, not both.")
         if input_ids is None and inputs_embeds is None:
@@ -301,6 +333,7 @@ class GraphAwareGPTBackbone(nn.Module):
         device: torch.device,
         dtype: torch.dtype,
     ) -> Optional[torch.Tensor]:
+        """Build additive graph attention bias for a sequence if adjacency is provided."""
         if adjacency_matrix is None:
             return None
 
@@ -325,7 +358,9 @@ class GraphAwareGPTBackbone(nn.Module):
         layer_head_mask: Optional[torch.Tensor],
         layer_attention_bias: Optional[torch.Tensor],
     ):
+        """Create a closure used by torch checkpoint for one block forward pass."""
         def checkpointed_forward(hidden_states_input):
+            """Checkpoint-compatible wrapper returning only hidden states."""
             outputs = block(
                 hidden_states_input,
                 layer_past=None,
@@ -356,6 +391,11 @@ class GraphAwareGPTBackbone(nn.Module):
         return_dict: Optional[bool] = None,
         adjacency_matrix: Optional[torch.FloatTensor] = None,
     ) -> Union[Tuple, dict]:
+        """Run the modified GPT-2 stack with optional graph attention bias.
+
+        This preserves a GPT-2-like API surface but routes masking through
+        ``adjacency_matrix`` -> additive ``attn_bias`` on selected top layers.
+        """
         # DG-LLM uses GPT-2 only as an embedding-driven decoder with graph bias.
         # The extra GPT-2 arguments stay here for compatibility with standard GPT-2 calls.
         del attention_mask, token_type_ids, encoder_hidden_states, encoder_attention_mask
@@ -448,13 +488,18 @@ class GraphAwareGPTBackbone(nn.Module):
             attentions=None,
         )
 
-    def forward(self, x: torch.Tensor, adjacency_matrix: torch.Tensor):
-        """
-        x: [B, T, D] input embeddings
-        adjacency_matrix: [T, T] with 1 for allowed edges and 0 for blocked edges
+    def forward(self, input_embeddings: torch.Tensor, adjacency_matrix: torch.Tensor):
+        """Apply the graph-aware GPT backbone to input embeddings.
+
+        Args:
+            input_embeddings: Embedded tokens in [B, T, D].
+            adjacency_matrix: Binary graph mask in [T, T] where 1 allows edges.
+
+        Returns:
+            Tensor with shape [B, T, D].
         """
         outputs = self._run_gpt2_backbone(
-            inputs_embeds=x,
+            inputs_embeds=input_embeddings,
             adjacency_matrix=adjacency_matrix,
             use_cache=False,
         )

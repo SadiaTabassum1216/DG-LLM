@@ -166,7 +166,7 @@ def main():
 
                 accumulation_step = batch_idx % trainer.grad_accum_steps
                 is_last_batch = batch_idx == num_train_batches - 1
-                loss, metrics = trainer.train_step(
+                loss, metrics = trainer.train(
                     tx,
                     ty,
                     tvmd,
@@ -188,7 +188,7 @@ def main():
                 ty = y.to(args.device, non_blocking=True).transpose(1, 3)[:, 0, :, :]
                 tvmd = vmd.to(args.device, non_blocking=True)
                 
-                loss, metrics = trainer.eval_step(tx, ty, tvmd)
+                loss, metrics = trainer.eval(tx, ty, tvmd)
                 val_loss.append(loss)
                 val_metrics.append(metrics)
             
@@ -301,7 +301,7 @@ def main():
         print("\n" + "="*60)
         print("  TESTING BEST MODEL")
         print("="*60)
-        test_results = trainer.test_model(data['test_loader'])
+        test_results = trainer.test(data['test_loader'])
         test_mae = test_results['mae']
         test_rmse = test_results['rmse']
         test_mape = test_results['mape']

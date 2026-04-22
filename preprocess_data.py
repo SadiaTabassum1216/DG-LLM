@@ -5,8 +5,8 @@ This script converts raw traffic data into the required format for training
 with configurable input and output sequence lengths.
 
 Usage:
-    python preprocess_data.py --data PEMSD04 --input_len 12 --output_len 24
-    python preprocess_data.py --data taxi_drop --input_len 24 --output_len 12
+    python preprocess_data.py --raw_path data/PEMSD04.npz --output_dir Dataset/PEMSD04/processed --input_len 12 --output_len 24
+    python preprocess_data.py --raw_path data/taxi.npy --output_dir Dataset/taxi_drop/processed --input_len 24 --output_len 12
     
 Raw data format expected:
     - .npz file with 'data' key: [total_timesteps, num_nodes, features]
@@ -17,6 +17,35 @@ import numpy as np
 import os
 import argparse
 from utils import create_sliding_windows
+
+
+def add_temporal_features(data: np.ndarray, steps_per_day: int = 288) -> np.ndarray:
+    """
+    Add time-of-day and day-of-week channels when only flow is present.
+    
+    Args:
+        data: Raw traffic data [total_timesteps, num_nodes, features]
+        steps_per_day: Number of timesteps in a single day
+        
+    Returns:
+        data with temporal features added (if not already present)
+    """
+    if data.shape[-1] >= 3:
+        return data
+
+    total_timesteps, num_nodes, _ = data.shape
+    step_indices = np.arange(total_timesteps)
+    
+    time_of_day = ((step_indices % steps_per_day) / float(steps_per_day)).astype(np.float32)
+    time_of_day = time_of_day[:, np.newaxis, np.newaxis]
+    time_of_day = np.tile(time_of_day, (1, num_nodes, 1))
+    
+    day_of_week = ((step_indices // steps_per_day) % 7).astype(np.float32)
+    day_of_week = day_of_week[:, np.newaxis, np.newaxis]
+    day_of_week = np.tile(day_of_week, (1, num_nodes, 1))
+    
+    data_with_features = np.concatenate([data[..., 0:1], time_of_day, day_of_week], axis=-1)
+    return data_with_features
 
 
 def split_data_chronologically(
@@ -116,6 +145,7 @@ def preprocess_dataset(
     output_dir: str,
     input_len: int = 12,
     output_len: int = 12,
+    steps_per_day: int = 288,
     train_ratio: float = 0.6,
     val_ratio: float = 0.2,
     test_ratio: float = 0.2
@@ -144,8 +174,13 @@ def preprocess_dataset(
     print(f"   - Number of nodes: {data.shape[1]}")
     print(f"   - Features: {data.shape[2]}")
     
+    # Add temporal features
+    print(f"\n2. Adding temporal features (steps_per_day={steps_per_day})...")
+    data = add_temporal_features(data, steps_per_day)
+    print(f"   Features updated to: {data.shape[2]}")
+    
     # Create sliding windows
-    print(f"\n2. Creating sliding windows...")
+    print(f"\n3. Creating sliding windows...")
     print(f"   - Input length: {input_len}")
     print(f"   - Output length: {output_len}")
     x, y = create_sliding_windows(data, input_len, output_len)
@@ -154,7 +189,7 @@ def preprocess_dataset(
     print(f"   - y shape: {y.shape}")
     
     # Split data
-    print(f"\n3. Splitting data chronologically...")
+    print(f"\n4. Splitting data chronologically...")
     print(f"   - Train: {train_ratio*100:.0f}%")
     print(f"   - Val: {val_ratio*100:.0f}%")
     print(f"   - Test: {test_ratio*100:.0f}%")
@@ -164,7 +199,7 @@ def preprocess_dataset(
         print(f"   {split_name}: {split_data['x'].shape[0]} samples")
     
     # Save processed data
-    print(f"\n4. Saving to: {output_dir}")
+    print(f"\n5. Saving to: {output_dir}")
     os.makedirs(output_dir, exist_ok=True)
     
     for split_name, split_data in splits.items():
@@ -224,6 +259,8 @@ Examples:
                         help='Input sequence length (default: 12)')
     parser.add_argument('--output_len', type=int, default=12,
                         help='Output sequence length (default: 12)')
+    parser.add_argument('--steps_per_day', type=int, default=288,
+                        help='Number of timesteps in a single day (default: 288 for 5-min intervals)')
     parser.add_argument('--train_ratio', type=float, default=0.6,
                         help='Training set ratio (default: 0.6)')
     parser.add_argument('--val_ratio', type=float, default=0.2,
@@ -243,6 +280,7 @@ Examples:
         output_dir=args.output_dir,
         input_len=args.input_len,
         output_len=args.output_len,
+        steps_per_day=args.steps_per_day,
         train_ratio=args.train_ratio,
         val_ratio=args.val_ratio,
         test_ratio=args.test_ratio

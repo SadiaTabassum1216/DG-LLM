@@ -5,15 +5,13 @@ import torch
 from tqdm import tqdm
 
 from utils import Ranger, MAE_torch, MAPE_torch, RMSE_torch, compute_metrics
-
+from model import DGLLM
 
 class Trainer:
     def __init__(self, args, scaler, adj_mx, device):
         self.args = args
         self.device = device
-        self.scaler = scaler
-
-        from model import DGLLM
+        self.scaler = scaler       
 
         self.model = DGLLM(
             device,
@@ -107,7 +105,7 @@ class Trainer:
 
         return checkpoint["epoch"], checkpoint["best_val_loss"]
 
-    def train_step(self, x, y_real, vmd_data, accumulation_step=0, is_last_batch=False):
+    def train(self, x, y_real, vmd_data, accumulation_step=0, is_last_batch=False):
         self.model.train()
 
         if accumulation_step == 0:
@@ -148,7 +146,7 @@ class Trainer:
 
         return (loss.item() * self.grad_accum_steps), compute_metrics(preds_scaled, real_scaled)
 
-    def eval_step(self, x, y_real, vmd_data):
+    def eval(self, x, y_real, vmd_data):
         """Run one evaluation step and return aggregate metrics."""
         self.model.eval()
         x_in = x.permute(0, 3, 2, 1)
@@ -170,7 +168,7 @@ class Trainer:
 
         return loss, metrics
 
-    def test_model(self, test_loader, model_path=None):
+    def test(self, test_loader, model_path=None):
         """Evaluate the test split and report per-horizon metrics."""
         if model_path is not None:
             self.load_model(model_path, strict=False)
