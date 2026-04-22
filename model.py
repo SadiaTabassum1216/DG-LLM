@@ -1,12 +1,10 @@
 import math
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from backbone import GraphAwareGPTBackbone
 from temporal_embedding import TemporalEmbedding
-
 
 class ModeProcessor(nn.Module):
     """

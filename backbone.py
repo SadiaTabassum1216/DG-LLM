@@ -14,6 +14,7 @@ def build_pairwise_attention_bias(
     device: torch.device,
     dtype: torch.dtype,
 ) -> torch.Tensor:
+    # Convert a binary adjacency matrix into an additive attention mask.
     """
     Convert a binary adjacency matrix [T, T] into an additive attention bias.
     Allowed edges receive 0, blocked edges receive -inf.
@@ -41,6 +42,7 @@ class GraphBiasGPT2Attention(GPT2Attention):
         device: torch.device,
         dtype: torch.dtype,
     ) -> torch.Tensor:
+        # Reuse a causal mask tensor for the current sequence shape.
         """Return a cached broadcastable causal additive bias.
 
         The cache key is ``(query_len, key_len, device)`` to avoid recreating
@@ -74,6 +76,7 @@ class GraphBiasGPT2Attention(GPT2Attention):
         attn_bias: Optional[torch.Tensor] = None,
         **kwargs,
     ):
+        # Run GPT-2 attention with an optional graph bias.
         """Run GPT-2 self-attention with optional additive graph bias.
 
         Args mirror Hugging Face GPT-2 attention for compatibility, with
@@ -157,6 +160,7 @@ class GraphBiasGPT2Block(GPT2Block):
         attn_bias: Optional[torch.Tensor] = None,
         **kwargs,
     ):
+        # Run one transformer block and pass graph bias into attention.
         """Run one GPT-2 block and forward graph attention bias to attention."""
         residual = hidden_states
         hidden_states = self.ln_1(hidden_states)
@@ -185,6 +189,7 @@ class GraphBiasGPT2Block(GPT2Block):
 
 
 def patch_gpt2_with_graph_bias(gpt2_model: GPT2Model) -> None:
+    # Replace GPT-2 attention and block classes in place.
     """
     Swap GPT-2 blocks and attention modules in place so pretrained weights remain intact.
     """
@@ -206,6 +211,7 @@ class GraphAwareGPTBackbone(nn.Module):
         dropout_rate: float = 0.0,
         use_gradient_checkpointing: bool = True,
     ):
+        # Build the graph-aware GPT-2 backbone and configure trainable layers.
         """Initialize GPT-2 backbone with LoRA and optional graph-biased attention.
 
         Args:
@@ -229,6 +235,7 @@ class GraphAwareGPTBackbone(nn.Module):
         self._configure_trainable_layers()
 
     def _build_gpt2_backbone(self):
+        # Load GPT-2, patch it, and attach LoRA adapters.
         """Create a truncated GPT-2 backbone patched with graph-biased attention and LoRA."""
         gpt2 = GPT2Model.from_pretrained(
             "gpt2",
@@ -250,6 +257,7 @@ class GraphAwareGPTBackbone(nn.Module):
         return get_peft_model(gpt2, lora_config)
 
     def _configure_trainable_layers(self) -> None:
+        # Select which GPT-2 parameters stay trainable in lower and upper layers.
         """Set trainability policy across backbone layers.
 
         Lower layers keep mostly normalization/positional parameters trainable,
@@ -272,6 +280,7 @@ class GraphAwareGPTBackbone(nn.Module):
         output_hidden_states: Optional[bool],
         return_dict: Optional[bool],
     ):
+        # Resolve runtime flags against model defaults.
         """Resolve runtime flags against GPT-2 config defaults."""
         return (
             use_cache if use_cache is not None else gpt2_model.config.use_cache,
@@ -289,6 +298,7 @@ class GraphAwareGPTBackbone(nn.Module):
         past_key_values: Optional[Tuple[Tuple[torch.Tensor]]],
         position_ids: Optional[torch.LongTensor],
     ):
+        # Build embeddings and position ids for the GPT-2 stack.
         """Validate and assemble GPT-2 hidden-state inputs.
 
         Returns:
@@ -333,6 +343,7 @@ class GraphAwareGPTBackbone(nn.Module):
         device: torch.device,
         dtype: torch.dtype,
     ) -> Optional[torch.Tensor]:
+        # Turn adjacency into a broadcastable graph attention bias.
         """Build additive graph attention bias for a sequence if adjacency is provided."""
         if adjacency_matrix is None:
             return None
@@ -358,8 +369,10 @@ class GraphAwareGPTBackbone(nn.Module):
         layer_head_mask: Optional[torch.Tensor],
         layer_attention_bias: Optional[torch.Tensor],
     ):
+        # Wrap one block so checkpointing can recompute its forward pass.
         """Create a closure used by torch checkpoint for one block forward pass."""
         def checkpointed_forward(hidden_states_input):
+            # Execute the block without cache so checkpointing stays compatible.
             """Checkpoint-compatible wrapper returning only hidden states."""
             outputs = block(
                 hidden_states_input,
@@ -391,6 +404,7 @@ class GraphAwareGPTBackbone(nn.Module):
         return_dict: Optional[bool] = None,
         adjacency_matrix: Optional[torch.FloatTensor] = None,
     ) -> Union[Tuple, dict]:
+        # Run the full GPT-2 backbone with optional graph bias and caching.
         """Run the modified GPT-2 stack with optional graph attention bias.
 
         This preserves a GPT-2-like API surface but routes masking through
@@ -489,6 +503,7 @@ class GraphAwareGPTBackbone(nn.Module):
         )
 
     def forward(self, input_embeddings: torch.Tensor, adjacency_matrix: torch.Tensor):
+        # Apply the backbone to token embeddings and return the final states.
         """Apply the graph-aware GPT backbone to input embeddings.
 
         Args:

@@ -1,7 +1,5 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import math
 
 class TemporalEmbedding(nn.Module):
     """
@@ -20,7 +18,7 @@ class TemporalEmbedding(nn.Module):
         nn.init.xavier_uniform_(self.time_week)
 
     def forward(self, x):
-        B, T, N, _ = x.shape
+        _, _, _, _ = x.shape
         
         # Use LAST timestep's temporal features (correct for prediction)
         day_emb = x[:, -1, :, 1]   # [B, N]

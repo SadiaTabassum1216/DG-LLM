@@ -4,10 +4,18 @@ Data Preprocessing Script for DG-LLM
 This script converts raw traffic data into the required format for training
 with configurable input and output sequence lengths.
 
-Usage:
-    python preprocess_data.py --raw_path data/PEMSD04.npz --output_dir Dataset/PEMSD04/processed --input_len 12 --output_len 24
-    python preprocess_data.py --raw_path data/taxi.npy --output_dir Dataset/taxi_drop/processed --input_len 24 --output_len 12
-    
+
+Example Usage:
+    Standard 12->12 preprocessing
+    python preprocess_data.py --raw_path data/PEMSD04.npz --output_dir Dataset/PEMSD04/processed
+
+    Custom Lengths: 12 input → 60 output
+    python preprocess_data.py --raw_path data/PEMSD04.npz --output_dir Dataset/PEMSD04_12_60/processed --input_len 12 --output_len 60
+
+    Custom split ratios: (70/15/15)
+    python preprocess_data.py --raw_path data/bike.npz --output_dir Dataset/bike/processed --train_ratio 0.7 --val_ratio 0.15 --test_ratio 0.15
+
+ 
 Raw data format expected:
     - .npz file with 'data' key: [total_timesteps, num_nodes, features]
     - or .npy file: [total_timesteps, num_nodes, features]
@@ -16,6 +24,7 @@ Raw data format expected:
 import numpy as np
 import os
 import argparse
+
 from utils import create_sliding_windows
 
 
@@ -235,20 +244,6 @@ def main():
     parser = argparse.ArgumentParser(
         description='Preprocess traffic data for DG-LLM',
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-    # Standard 12->12 preprocessing
-    python preprocess_data.py --raw_path data/PEMSD04.npz --output_dir Dataset/PEMSD04/processed
-
-    # Long-term forecasting: 12 input → 60 output
-    python preprocess_data.py --raw_path data/PEMSD04.npz --output_dir Dataset/PEMSD04_12_60/processed --input_len 12 --output_len 60
-
-    # More history: 24 input → 12 output  
-    python preprocess_data.py --raw_path data/taxi.npy --output_dir Dataset/taxi_24_12/processed --input_len 24 --output_len 12
-
-    # Custom split ratios (70/15/15)
-    python preprocess_data.py --raw_path data/bike.npz --output_dir Dataset/bike/processed --train_ratio 0.7 --val_ratio 0.15 --test_ratio 0.15
-        """
     )
     
     parser.add_argument('--raw_path', type=str, required=True,

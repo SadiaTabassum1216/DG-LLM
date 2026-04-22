@@ -5,10 +5,11 @@ import argparse
 import json
 import time
 from tqdm import tqdm
-from data_loader import load_dataset_optimized
+
+from utils import load_pickle, seed_everything
+from data_loader import load_dataset
 from trainer import Trainer
 from visualization import plot_predictions_vs_ground_truth, validate_temporal_features, plot_error_diagnostics, plot_weekly_1step_ahead_predictions
-from utils import load_pickle, seed_everything
 from paths import DATASET_DIR, RESULTS_LOGS_DIR
 
 
@@ -108,7 +109,7 @@ def main():
     # 1. Load Data
     print(">> Loading Dataset...")
     seed_everything(args.seed)
-    data = load_dataset_optimized(args.data_path, args.batch_size, args)
+    data = load_dataset(args.data_path, args.batch_size, args)
     
     # Sanity check
     validate_temporal_features(data['train_loader'])

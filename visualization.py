@@ -12,8 +12,6 @@ All visualizations are saved as PNG files to the specified directory.
 
 import matplotlib.pyplot as plt
 import seaborn as sns
-import torch
-import numpy as np
 import os
 from paths import RESULTS_LOGS_DIR
 
