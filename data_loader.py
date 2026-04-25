@@ -41,8 +41,11 @@ def _get_writable_dir(preferred_dir, dataset_name):
     )
 
 
-class DataLoaderClass:
-    """Memory-efficient DataLoader with pinned-memory tensors for fast GPU transfer."""
+class TrafficDataLoader:
+    """
+    A memory-efficient data loader that provides batches of traffic sequences.
+    Uses pinned memory for significantly faster transfers to the GPU.
+    """
     # Converts arrays to tensors and prepares batched iteration settings.
     def __init__(self, data_x, data_y, vmd_data, batch_size, shuffle=False):
         # Pre-convert numpy → tensor once (avoids per-batch conversion overhead)
@@ -128,8 +131,8 @@ def _validate_runtime_input_length(data, dataset_dir, args):
     print(f"  Data shapes: x_train={data['x_train'].shape}, y_train={data['y_train'].shape}")
 
 
-# Fits and applies scaling on feature channel 0 across all loaded splits.
-def _scale_input_feature_zero(data):
+# Normalizes the primary traffic flow feature (channel 0) to a standard range.
+def _normalize_traffic_flow(data):
     scaler = StandardScaler(mean=data["x_train"][..., 0].mean(), std=data["x_train"][..., 0].std())
     for split in SPLITS:
         x_key = f"x_{split}"
@@ -138,8 +141,8 @@ def _scale_input_feature_zero(data):
     return scaler
 
 
-# Loads cached VMD output or computes and saves it when cache is missing.
-def _get_or_compute_vmd(split_name, split_input, args, input_cache_dir, output_cache_dir, force_recompute=False):
+# Retrieves pre-processed VMD modes from the cache or calculates them on the fly.
+def _load_or_extract_vmd_modes(split_name, split_input, args, input_cache_dir, output_cache_dir, force_recompute=False):
     config_id = f"{args.data}_T{args.input_len}_K{args.vmd_k}"
     filename = f"vmd_{split_name}_{config_id}.npy"
 
@@ -179,13 +182,13 @@ def _shuffle_train_data(data):
     data["vmd_train"] = data["vmd_train"][permutation]
 
 
-# Attaches DataLoaderClass instances for train, validation, and test splits.
-def _attach_loaders(data, batch_size):
-    data["train_loader"] = DataLoaderClass(
+# Creates the training, validation, and test iterators.
+def _create_data_iterators(data, batch_size):
+    data["train_loader"] = TrafficDataLoader(
         data["x_train"], data["y_train"], data["vmd_train"], batch_size, shuffle=True
     )
-    data["val_loader"] = DataLoaderClass(data["x_val"], data["y_val"], data["vmd_val"], batch_size)
-    data["test_loader"] = DataLoaderClass(data["x_test"], data["y_test"], data["vmd_test"], batch_size)
+    data["val_loader"] = TrafficDataLoader(data["x_val"], data["y_val"], data["vmd_val"], batch_size)
+    data["test_loader"] = TrafficDataLoader(data["x_test"], data["y_test"], data["vmd_test"], batch_size)
 
 
 
@@ -211,21 +214,21 @@ def load_dataset(dataset_dir, batch_size, args, force_recompute=False):
     data = _load_data_splits(dataset_dir)
     _validate_runtime_input_length(data, dataset_dir, args)
 
-    scaler = _scale_input_feature_zero(data)
+    scaler = _normalize_traffic_flow(data)
 
     print("Checking VMD Cache...")
-    data["vmd_train"] = _get_or_compute_vmd(
+    data["vmd_train"] = _load_or_extract_vmd_modes(
         "train", data["x_train"], args, input_cache_dir, output_cache_dir, force_recompute
     )
-    data["vmd_val"] = _get_or_compute_vmd(
+    data["vmd_val"] = _load_or_extract_vmd_modes(
         "val", data["x_val"], args, input_cache_dir, output_cache_dir, force_recompute
     )
-    data["vmd_test"] = _get_or_compute_vmd(
+    data["vmd_test"] = _load_or_extract_vmd_modes(
         "test", data["x_test"], args, input_cache_dir, output_cache_dir, force_recompute
     )
 
     _shuffle_train_data(data)
 
-    _attach_loaders(data, batch_size)
+    _create_data_iterators(data, batch_size)
     data["scaler"] = scaler
     return data

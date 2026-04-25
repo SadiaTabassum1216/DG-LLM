@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from backbone import GraphAwareGPTBackbone
+from backbone import SpatialGPTBackbone
 from temporal_embedding import TemporalEmbedding
 
 class ModeProcessor(nn.Module):
@@ -139,7 +139,7 @@ class ModeProcessor(nn.Module):
         self.temporal_projection = nn.Linear(3 * gpt_channel, backbone_channel, bias=False)
         self.temporal_gate = nn.Linear(backbone_channel, backbone_channel)
 
-        self.backbone = GraphAwareGPTBackbone(
+        self.backbone = SpatialGPTBackbone(
             device,
             gpt_layers=llm_layer,
             U=U,
@@ -147,24 +147,21 @@ class ModeProcessor(nn.Module):
         )
         self.regression_layer = nn.Conv2d(backbone_channel, output_len, kernel_size=(1, 1))
 
-    def ensure_btnf_layout(self, input_tensor: torch.Tensor) -> torch.Tensor:
+    def _standardize_layout(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Normalize inputs to [B, T, N, F] layout.
-        This primarily serves as a safety check now that the pipeline is harmonized.
+        Ensures the input tensor follows the standard [Batch, Time, Nodes, Features] layout.
         """
-        # If input is [B, F, N, T], convert to [B, T, N, F]
-        if input_tensor.dim() == 4 and input_tensor.shape[1] == self.input_dim:
-            return input_tensor.permute(0, 3, 2, 1).contiguous()
-        return input_tensor
+        # Convert legacy [Batch, Features, Nodes, Time] to standard layout
+        if x.dim() == 4 and x.shape[1] == self.input_dim:
+            return x.permute(0, 3, 2, 1).contiguous()
+        return x
 
-    def _compute_temporal_multiscale_features(self, history_data: torch.Tensor) -> torch.Tensor:
-        """Extract pooled multi-scale temporal features for each node.
-
-        Args:
-            history_data: Input tensor in [B, T, N, F].
+    def _extract_temporal_patterns(self, history_data: torch.Tensor) -> torch.Tensor:
+        """
+        Extracts multi-scale temporal features (short-term and long-term trends) for each node.
 
         Returns:
-            Tensor of shape [B, N, D_backbone].
+            A tensor of shape [Batch, Nodes, Features].
         """
         batch_size, time_steps, num_nodes, feature_dim = history_data.shape
         temporal_input = history_data.permute(0, 2, 3, 1).reshape(
@@ -179,35 +176,36 @@ class ModeProcessor(nn.Module):
         temporal_features = self.temporal_projection(temporal_features)
         return temporal_features.view(batch_size, num_nodes, -1)
 
-    def _current_graph_mix(self) -> float:
-        """Return the current fixed-vs-learned graph mixing factor.
-
-        The factor linearly anneals from ``mix_hi`` to ``mix_lo`` over
-        ``warmup_steps`` based on ``global_step``.
+    def _get_blending_ratio(self) -> float:
+        """
+        Calculates the current blending ratio between the fixed road network and the learned graph.
+        
+        The ratio shifts from 'mix_hi' (mostly fixed) to 'mix_lo' (mostly learned) 
+        during the initial training warmup.
         """
         step = float(self.global_step.item())
         warmup = max(self.warmup_steps, 1)
         progress = min(step / warmup, 1.0)
         return self.mix_hi + (self.mix_lo - self.mix_hi) * progress
 
-    def _compute_degree_prior(self, adjacency_scores: torch.Tensor) -> torch.Tensor:
-        """Compute a normalized node-degree prior from soft adjacency scores."""
-        degree = adjacency_scores.sum(dim=-1, keepdim=True)
-        max_degree = degree.max() + 1e-6
-        return degree / max_degree
+    def _calculate_node_importance(self, graph_scores: torch.Tensor) -> torch.Tensor:
+        """Weights nodes based on their relative connectivity (degree) in the graph."""
+        importance = graph_scores.sum(dim=-1, keepdim=True)
+        max_importance = importance.max() + 1e-6
+        return importance / max_importance
 
-    def _build_dynamic_adjacency(self, features: torch.Tensor) -> torch.Tensor:
+    def _generate_adaptive_graph(self, features: torch.Tensor) -> torch.Tensor:
         """
-        Build a binary dynamic adjacency matrix from node features.
+        Generates a custom, dynamic graph structure based on current traffic features.
 
         Args:
-            features: Node features in [B, N, D].
+            features: Current node states in [Batch, Nodes, Dimension].
 
         Returns:
-            Binary adjacency matrix in [N, N].
+            A binary connectivity matrix [Nodes, Nodes].
         """
         _, num_nodes, _ = features.shape
-        mix_alpha = self._current_graph_mix()
+        mix_alpha = self._get_blending_ratio()
 
         normalized_features = F.normalize(features, dim=-1)
         query = self.gat_q(normalized_features)
@@ -232,58 +230,54 @@ class ModeProcessor(nn.Module):
             logits = logits_all.mean(dim=1)
 
         logits = logits / max(self.gat_tau, 1e-6)
-        adjacency_prob = torch.softmax(logits, dim=-1)
+        graph_prob = torch.softmax(logits, dim=-1)
 
-        mean_adjacency = adjacency_prob.mean(dim=0).detach()
-        self.ema_A = self.ema_m * self.ema_A + (1.0 - self.ema_m) * mean_adjacency
+        mean_graph = graph_prob.mean(dim=0).detach()
+        self.ema_A = self.ema_m * self.ema_A + (1.0 - self.ema_m) * mean_graph
 
-        # Use pre-computed normalized adjacency matrix
-        adjacency_scores = (1.0 - mix_alpha) * self.ema_A + mix_alpha * self.norm_adj_mx
+        # Mix current learned weights with the pre-computed static normalized adjacency
+        graph_scores = (1.0 - mix_alpha) * self.ema_A + mix_alpha * self.norm_adj_mx
 
         if self.training and self.edge_dropout > 0:
-            keep_mask = (torch.rand_like(adjacency_scores) > self.edge_dropout).float()
-            adjacency_scores = adjacency_scores * keep_mask
+            keep_mask = (torch.rand_like(graph_scores) > self.edge_dropout).float()
+            graph_scores = graph_scores * keep_mask
 
-        degree_prior = self._compute_degree_prior(adjacency_scores)
-        # Apply degree prior with configured scaling
-        adjacency_scores = adjacency_scores * (
-            self.DEGREE_PRIOR_BASE + self.DEGREE_PRIOR_SCALE * degree_prior
+        importance_weight = self._calculate_node_importance(graph_scores)
+        # Apply connectivity-based weighting
+        graph_scores = graph_scores * (
+            self.DEGREE_PRIOR_BASE + self.DEGREE_PRIOR_SCALE * importance_weight
         )
 
-        working_scores = adjacency_scores.clone()
+        working_scores = graph_scores.clone()
         working_scores.fill_diagonal_(0.0)
 
+        # Retain only the strongest connections (top-K pruning)
         keep_ratio = min(max(float(self.p_keep), 1e-3), 0.99)
         threshold = torch.quantile(working_scores, 1.0 - keep_ratio, dim=-1, keepdim=True)
-        adjacency_binary = (working_scores >= threshold).float()
+        graph_binary = (working_scores >= threshold).float()
 
-        adjacency_binary.fill_diagonal_(1.0)
+        # Nodes are always connected to themselves
+        graph_binary.fill_diagonal_(1.0)
         if self.symmetrize:
-            adjacency_binary = torch.maximum(adjacency_binary, adjacency_binary.t())
+            graph_binary = torch.maximum(graph_binary, graph_binary.t())
 
+        # Confidence-based hysteresis to maintain graph stability over time
         row_mean = working_scores.mean(dim=-1, keepdim=True)
         low_confidence_mask = (working_scores < (row_mean * self.hysteresis_ratio)).float()
         keep_previous_edges = self.prev_A * (1.0 - low_confidence_mask)
-        adjacency_binary = torch.clamp(adjacency_binary + keep_previous_edges, 0.0, 1.0)
-        self.prev_A = adjacency_binary.detach()
+        graph_binary = torch.clamp(graph_binary + keep_previous_edges, 0.0, 1.0)
+        self.prev_A = graph_binary.detach()
 
         self.global_step += 1
+        # During warmup, strictly enforce the static physical road network
         if self.global_step.item() < self.warmup_steps:
-            adjacency_binary = torch.maximum(adjacency_binary, self.binary_adj_mx)
+            graph_binary = torch.maximum(graph_binary, self.binary_adj_mx)
 
-        return adjacency_binary
+        return graph_binary
 
     def forward(self, input_tensor: torch.Tensor):
-        """Run a forward pass for one VMD mode.
-
-        Args:
-            input_tensor: Mode-specific input in [B, T, N, F] (or legacy [B, F, N, T]).
-
-        Returns:
-            Tuple ``(prediction, adjacency)`` where prediction is [B, T_out, N, 1]
-            and adjacency is [N, N].
-        """
-        input_tensor = self.ensure_btnf_layout(input_tensor)
+        """Processes one VMD mode through the spatio-temporal layers."""
+        input_tensor = self._standardize_layout(input_tensor)
         batch_size, _, num_nodes, _ = input_tensor.shape
 
         temporal_embedding = self.temporal_embedding(input_tensor)
@@ -301,13 +295,13 @@ class ModeProcessor(nn.Module):
         spatiotemporal_features = F.leaky_relu(spatiotemporal_features).permute(0, 2, 1, 3).squeeze(-1)
         spatiotemporal_features = self.feature_norm(spatiotemporal_features)
 
-        temporal_features = self._compute_temporal_multiscale_features(input_tensor)
+        temporal_features = self._extract_temporal_patterns(input_tensor)
         # Use separate LayerNorm for temporal features to avoid interference
         temporal_gate = torch.sigmoid(self.temporal_gate(self.temporal_feature_norm(temporal_features)))
         fused_features = spatiotemporal_features + temporal_gate * temporal_features
 
         if self.use_dynamic_graph:
-            adjacency = self._build_dynamic_adjacency(fused_features)
+            adjacency = self._generate_adaptive_graph(fused_features)
         else:
             adjacency = self.adj_mx
 
@@ -381,15 +375,14 @@ class DGLLM(nn.Module):
 
     def forward(self, vmd_data, original_input):
         """
-        Run end-to-end prediction across all VMD modes.
+        Runs the end-to-end prediction by processing and fusing all traffic modes.
 
         Args:
-            vmd_data: Decomposed mode inputs in [B, K, T, N, 1].
-            original_input: Original input in [B, T, N, F].
+            vmd_data: Frequency-decomposed traffic modes [Batch, Modes, Time, Nodes, 1].
+            original_input: Original traffic data [Batch, Time, Nodes, Features].
 
         Returns:
-            Tuple ``(final_prediction, learned_graphs)`` where final_prediction is
-            [B, T_out, N, 1] and learned_graphs is a list of [N, N] adjacencies.
+            A tuple of (final_forecast, learned_graph_structures).
         """
         _, num_modes, _, _, _ = vmd_data.shape
         time_features = original_input[..., 1:]
@@ -405,7 +398,7 @@ class DGLLM(nn.Module):
             learned_graphs.append(adjacency)
 
         if self.use_attention_fusion:
-            final_prediction = self.fuse_mode_predictions(mode_predictions)
+            final_prediction = self._blend_modes(mode_predictions)
         else:
             mode_weights = F.softmax(self.mode_weights, dim=0)
             final_prediction = sum(
@@ -419,15 +412,8 @@ class DGLLM(nn.Module):
 
         return final_prediction, learned_graphs
 
-    def fuse_mode_predictions(self, mode_predictions):
-        """Fuse per-mode predictions using attention-derived mode weights.
-
-        Args:
-            mode_predictions: List of tensors each with shape [B, T_out, N, 1].
-
-        Returns:
-            Tensor with shape [B, T_out, N, 1].
-        """
+    def _blend_modes(self, mode_predictions):
+        """Blends predictions from different VMD modes using an attention mechanism."""
         stacked_predictions = torch.stack(mode_predictions, dim=0)  # [K, B, T, N, 1]
         num_modes, batch_size, output_len, num_nodes, _ = stacked_predictions.shape
 

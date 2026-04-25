@@ -9,30 +9,24 @@ from transformers.modeling_outputs import BaseModelOutputWithPastAndCrossAttenti
 from transformers.models.gpt2.modeling_gpt2 import GPT2Attention, GPT2Block, GPT2Model
 
 
-def build_pairwise_attention_bias(
-    adjacency_matrix: torch.Tensor,
+def _create_spatial_attention_mask(
+    connectivity_matrix: torch.Tensor,
     device: torch.device,
     dtype: torch.dtype,
 ) -> torch.Tensor:
-    # Convert a binary adjacency matrix into an additive attention mask.
     """
-    Convert a binary adjacency matrix [T, T] into an additive attention bias.
-    Allowed edges receive 0, blocked edges receive -inf.
+    Converts a binary road-network matrix into an additive mask for the attention mechanism.
+    Connected nodes get a 0 bias, while disconnected nodes get -inf to block influence.
     """
-    assert (
-        adjacency_matrix.dim() == 2
-        and adjacency_matrix.size(0) == adjacency_matrix.size(1)
-    ), "adjacency_matrix must be [T, T]"
-
-    seq_len = adjacency_matrix.size(0)
-    bias = torch.zeros((seq_len, seq_len), device=device, dtype=dtype)
-    bias = bias.masked_fill(~adjacency_matrix.to(torch.bool), float("-inf"))
-    return bias.view(1, 1, seq_len, seq_len)
+    seq_len = connectivity_matrix.size(0)
+    mask = torch.zeros((seq_len, seq_len), device=device, dtype=dtype)
+    mask = mask.masked_fill(~connectivity_matrix.to(torch.bool), float("-inf"))
+    return mask.view(1, 1, seq_len, seq_len)
 
 
-class GraphBiasGPT2Attention(GPT2Attention):
+class SpatialAwareGPT2Attention(GPT2Attention):
     """
-    GPT-2 attention layer extended with an additive graph bias.
+    GPT-2 attention layer modified to respect the spatial layout of the traffic network.
     """
 
     def _get_cached_causal_bias(
@@ -152,9 +146,9 @@ class GraphBiasGPT2Attention(GPT2Attention):
         return attn_output, present
 
 
-class GraphBiasGPT2Block(GPT2Block):
+class SpatialAwareGPT2Block(GPT2Block):
     """
-    GPT-2 block variant that forwards attn_bias into the attention layer.
+    A transformer block that passes spatial connectivity info into its attention layer.
     """
 
     def forward(
@@ -198,19 +192,18 @@ class GraphBiasGPT2Block(GPT2Block):
         return (hidden_states,)
 
 
-def patch_gpt2_with_graph_bias(gpt2_model: GPT2Model) -> None:
-    # Replace GPT-2 attention and block classes in place.
+def _inject_spatial_awareness(gpt2_model: GPT2Model) -> None:
     """
-    Swap GPT-2 blocks and attention modules in place so pretrained weights remain intact.
+    Swaps standard GPT-2 layers with spatial-aware versions while preserving weights.
     """
     for block in gpt2_model.h:
-        block.attn.__class__ = GraphBiasGPT2Attention
-        block.__class__ = GraphBiasGPT2Block
+        block.attn.__class__ = SpatialAwareGPT2Attention
+        block.__class__ = SpatialAwareGPT2Block
 
 
-class GraphAwareGPTBackbone(nn.Module):
+class SpatialGPTBackbone(nn.Module):
     """
-    GPT-2 backbone with LoRA adaptation and graph-aware attention bias on the top layers.
+    The core transformer backbone, adapted with spatial awareness for traffic forecasting.
     """
 
     def __init__(
@@ -241,12 +234,11 @@ class GraphAwareGPTBackbone(nn.Module):
         self.lora_rank = 16
         self.dropout = nn.Dropout(p=dropout_rate)
 
-        self.gpt2 = self._build_gpt2_backbone()
-        self._configure_trainable_layers()
+        self.gpt2 = self._init_base_model()
+        self._freeze_lower_layers()
 
-    def _build_gpt2_backbone(self):
-        # Load GPT-2, patch it, and attach LoRA adapters.
-        """Create a truncated GPT-2 backbone patched with graph-biased attention and LoRA."""
+    def _init_base_model(self):
+        """Loads GPT-2 and wraps it with spatial-aware layers and LoRA adapters."""
         gpt2 = GPT2Model.from_pretrained(
             "gpt2",
             attn_implementation="eager",
@@ -255,7 +247,7 @@ class GraphAwareGPTBackbone(nn.Module):
         )
         gpt2.h = gpt2.h[: self.num_backbone_layers]
 
-        patch_gpt2_with_graph_bias(gpt2)
+        _inject_spatial_awareness(gpt2)
 
         lora_config = LoraConfig(
             r=self.lora_rank,
@@ -266,13 +258,8 @@ class GraphAwareGPTBackbone(nn.Module):
         )
         return get_peft_model(gpt2, lora_config)
 
-    def _configure_trainable_layers(self) -> None:
-        # Select which GPT-2 parameters stay trainable in lower and upper layers.
-        """Set trainability policy across backbone layers.
-
-        Lower layers keep mostly normalization/positional parameters trainable,
-        while top ``U`` layers remain broadly trainable except MLP weights.
-        """
+    def _freeze_lower_layers(self) -> None:
+        """Freezes early layers to preserve pre-trained knowledge, keeping only top layers trainable."""
         total_layers = len(self.gpt2.base_model.model.h)
         top_layer_start = total_layers - self.unfrozen_top_layers
 
@@ -346,29 +333,28 @@ class GraphAwareGPTBackbone(nn.Module):
         hidden_states = inputs_embeds + gpt2_model.wpe(position_ids)
         return hidden_states, device, past_key_values
 
-    def _build_graph_attention_bias(
+    def _build_spatial_mask(
         self,
-        adjacency_matrix: Optional[torch.FloatTensor],
+        connectivity_matrix: Optional[torch.FloatTensor],
         sequence_length: int,
         device: torch.device,
         dtype: torch.dtype,
     ) -> Optional[torch.Tensor]:
-        # Turn adjacency into a broadcastable graph attention bias.
-        """Build additive graph attention bias for a sequence if adjacency is provided."""
-        if adjacency_matrix is None:
+        """Prepares the spatial mask if connectivity information is available."""
+        if connectivity_matrix is None:
             return None
 
         if (
-            adjacency_matrix.dim() != 2
-            or adjacency_matrix.size(0) != sequence_length
-            or adjacency_matrix.size(1) != sequence_length
+            connectivity_matrix.dim() != 2
+            or connectivity_matrix.size(0) != sequence_length
+            or connectivity_matrix.size(1) != sequence_length
         ):
             raise ValueError(
-                f"adjacency_matrix must be [T, T] matching sequence length {sequence_length}"
+                f"connectivity_matrix must be [T, T] matching sequence length {sequence_length}"
             )
 
-        return build_pairwise_attention_bias(
-            adjacency_matrix=adjacency_matrix.to(device),
+        return _create_spatial_attention_mask(
+            connectivity_matrix=connectivity_matrix.to(device),
             device=device,
             dtype=dtype,
         )
@@ -397,7 +383,7 @@ class GraphAwareGPTBackbone(nn.Module):
 
         return checkpointed_forward
 
-    def _run_gpt2_backbone(
+    def _process_sequence(
         self,
         input_ids: Optional[torch.LongTensor] = None,
         past_key_values: Optional[Tuple[Tuple[torch.Tensor]]] = None,
@@ -412,14 +398,9 @@ class GraphAwareGPTBackbone(nn.Module):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-        adjacency_matrix: Optional[torch.FloatTensor] = None,
+        connectivity_matrix: Optional[torch.FloatTensor] = None,
     ) -> Union[Tuple, dict]:
-        # Run the full GPT-2 backbone with optional graph bias and caching.
-        """Run the modified GPT-2 stack with optional graph attention bias.
-
-        This preserves a GPT-2-like API surface but routes masking through
-        ``adjacency_matrix`` -> additive ``attn_bias`` on selected top layers.
-        """
+        """Processes the input sequence through the spatial-aware transformer layers."""
         # DG-LLM uses GPT-2 only as an embedding-driven decoder with graph bias.
         # The extra GPT-2 arguments stay here for compatibility with standard GPT-2 calls.
         del attention_mask, token_type_ids, encoder_hidden_states, encoder_attention_mask
@@ -444,8 +425,8 @@ class GraphAwareGPTBackbone(nn.Module):
         all_hidden_states = () if output_hidden_states else None
         presents = () if use_cache else None
 
-        graph_attention_bias = self._build_graph_attention_bias(
-            adjacency_matrix=adjacency_matrix,
+        spatial_mask = self._build_spatial_mask(
+            connectivity_matrix=connectivity_matrix,
             sequence_length=hidden_states.size(1),
             device=device,
             dtype=hidden_states.dtype,
@@ -458,8 +439,8 @@ class GraphAwareGPTBackbone(nn.Module):
             # Only the top unfrozen layers consume the graph bias. Lower layers remain
             # plain GPT-2 blocks so local language-model structure is preserved.
             layer_attention_bias = (
-                graph_attention_bias
-                if layer_index >= top_layer_start and graph_attention_bias is not None
+                spatial_mask
+                if layer_index >= top_layer_start and spatial_mask is not None
                 else None
             )
             layer_head_mask = head_mask[layer_index] if head_mask is not None else None
@@ -512,20 +493,11 @@ class GraphAwareGPTBackbone(nn.Module):
             attentions=None,
         )
 
-    def forward(self, input_embeddings: torch.Tensor, adjacency_matrix: torch.Tensor):
-        # Apply the backbone to token embeddings and return the final states.
-        """Apply the graph-aware GPT backbone to input embeddings.
-
-        Args:
-            input_embeddings: Embedded tokens in [B, T, D].
-            adjacency_matrix: Binary graph mask in [T, T] where 1 allows edges.
-
-        Returns:
-            Tensor with shape [B, T, D].
-        """
-        outputs = self._run_gpt2_backbone(
+    def forward(self, input_embeddings: torch.Tensor, connectivity_matrix: torch.Tensor):
+        """Processes input embeddings using the spatial-aware transformer backbone."""
+        outputs = self._process_sequence(
             inputs_embeds=input_embeddings,
-            adjacency_matrix=adjacency_matrix,
+            connectivity_matrix=connectivity_matrix,
             use_cache=False,
         )
         return self.dropout(outputs.last_hidden_state)
