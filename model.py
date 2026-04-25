@@ -25,11 +25,11 @@ class ModeProcessor(nn.Module):
     DEFAULT_EDGE_DROPOUT = 0.11  # Optuna Bayesian optimized
     DEFAULT_SYMMETRIZE = True
     DEFAULT_HYSTERESIS_RATIO = 0.85  # Optuna Bayesian optimized
-    DEFAULT_WARMUP_STEPS = 500
+    DEFAULT_WARMUP_STEPS = 850  # Optuna Bayesian optimized (was 500)
     
     # Degree prior scaling coefficients
-    DEGREE_PRIOR_BASE = 0.8
-    DEGREE_PRIOR_SCALE = 0.2
+    DEGREE_PRIOR_BASE = 0.29  # Optuna Bayesian optimized (was 0.8)
+    DEGREE_PRIOR_SCALE = 0.94  # Optuna Bayesian optimized (was 0.2)
 
     def __init__(
         self,

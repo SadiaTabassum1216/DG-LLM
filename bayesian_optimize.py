@@ -9,11 +9,10 @@ from model import DGLLM
 from utils import seed_everything, load_pickle
 
 def create_model(trial, args, device, adj_mx):
-    # Sample secondary hyperparameters
-    hysteresis_ratio = trial.suggest_float("hysteresis_ratio", 0.5, 0.95)
-    gat_tau = trial.suggest_float("gat_tau", 0.1, 2.0)
-    head_dropout = trial.suggest_float("head_dropout", 0.0, 0.5)
-    edge_dropout = trial.suggest_float("edge_dropout", 0.0, 0.5)
+    # Sample final hyperparameters
+    warmup_steps = trial.suggest_int("warmup_steps", 100, 1000)
+    degree_prior_base = trial.suggest_float("degree_prior_base", 0.1, 1.0)
+    degree_prior_scale = trial.suggest_float("degree_prior_scale", 0.0, 1.0)
         
     model = DGLLM(
         device=device,
@@ -30,10 +29,9 @@ def create_model(trial, args, device, adj_mx):
     
     # Inject hyperparameters into each mode processor
     for mode_proc in model.mode_models:
-        mode_proc.hysteresis_ratio = hysteresis_ratio
-        mode_proc.gat_tau = gat_tau
-        mode_proc.head_dropout = head_dropout
-        mode_proc.edge_dropout = edge_dropout
+        mode_proc.warmup_steps = warmup_steps
+        mode_proc.DEGREE_PRIOR_BASE = degree_prior_base
+        mode_proc.DEGREE_PRIOR_SCALE = degree_prior_scale
     
     return model
 
