@@ -16,65 +16,60 @@ class ModeProcessor(nn.Module):
     DEFAULT_GPT_CHANNEL = 256
     DEFAULT_BACKBONE_CHANNEL = 768  # 3 * gpt_channel
     
-    # Hyperparameters for graph attention and adjacency learning
-    DEFAULT_HEAD_DROPOUT = 0.31  # Optuna Bayesian optimized
-    DEFAULT_LEAKY_SLOPE = 0.30  # Optuna Bayesian optimized 
-    DEFAULT_GAT_TAU = 1.03  # Optuna Bayesian optimized
-    DEFAULT_EMA_M = 0.90  # Optuna Bayesian optimized 
+    # Final Optimized Hyperparameters (from Consolidated Bayesian Run)
+    DEFAULT_HEAD_DROPOUT = 0.34
+    DEFAULT_LEAKY_SLOPE = 0.20
+    DEFAULT_GAT_TAU = 1.47
+    DEFAULT_EMA_M = 0.81
     DEFAULT_EPSILON = 1e-6
-    DEFAULT_EDGE_DROPOUT = 0.11  # Optuna Bayesian optimized
+    DEFAULT_EDGE_DROPOUT = 0.12
     DEFAULT_SYMMETRIZE = True
-    DEFAULT_HYSTERESIS_RATIO = 0.85  # Optuna Bayesian optimized
-    DEFAULT_WARMUP_STEPS = 850  # Optuna Bayesian optimized (was 500)
+    DEFAULT_HYSTERESIS_RATIO = 0.66
+    DEFAULT_WARMUP_STEPS = 732
+    DEFAULT_P_KEEP = 0.13
+    DEFAULT_MIX_HI = 0.77
+    DEFAULT_MIX_LO = 0.57
     
-    # Degree prior scaling coefficients
-    DEGREE_PRIOR_BASE = 0.29  # Optuna Bayesian optimized (was 0.8)
-    DEGREE_PRIOR_SCALE = 0.94  # Optuna Bayesian optimized (was 0.2)
+    # Node Importance (Degree Prior) parameters
+    DEGREE_PRIOR_BASE = 0.37  
+    DEGREE_PRIOR_SCALE = 0.42 
+
+    # --- Spatio-Temporal Hyperparameters ---
+    # These control how nodes interact and how the graph structure evolves over time.
+    # Optuna Bayesian optimization has been used to find the best default values.
+    
+    # Pruning: Only the top p_keep percentage of learned edges are kept to maintain sparsity.
+    # Blending (mix_hi/mix_lo): Controls the transition from the physical road network (high mix) 
+    # to the learned adaptive graph (low mix) during training.
+    # Hysteresis: Prevents rapid oscillation of graph edges by penalizing sudden removals.
+    # Warmup: The number of steps over which the blending ratio and degree prior are annealed.
 
     def __init__(
         self,
         device,
-        adj_mx,
-        input_dim=3,
-        num_nodes=266,
-        input_len=12,
-        output_len=12,
-        llm_layer=6,
-        U=1,
+        static_road_network,
+        input_dim,
+        num_nodes,
+        input_len,
+        output_len,
+        llm_layer,
+        U,
+        backbone_channel=DEFAULT_BACKBONE_CHANNEL,
+        gpt_channel=DEFAULT_GPT_CHANNEL,
         use_dynamic_graph=True,
         heads=4,
-        gpt_channel=DEFAULT_GPT_CHANNEL,
-        backbone_channel=DEFAULT_BACKBONE_CHANNEL,
-        time_steps=DEFAULT_TIME_STEPS,
-        p_keep=0.06,  # Optuna Bayesian optimized 
-        mix_hi=0.89,  # Optuna Bayesian optimized
-        mix_lo=0.50,  # Optuna Bayesian optimized 
+        p_keep=DEFAULT_P_KEEP,
+        mix_hi=DEFAULT_MIX_HI,
+        mix_lo=DEFAULT_MIX_LO,
     ):
-        """Initialize a single-mode spatio-temporal processing block.
-
-        Args:
-            device: Target torch device.
-            adj_mx: Static adjacency matrix used as graph prior.
-            input_dim: Number of input features per node and time step.
-            num_nodes: Number of graph nodes.
-            input_len: Number of historical time steps.
-            output_len: Forecast horizon.
-            llm_layer: Number of backbone transformer-like layers.
-            U: Backbone expansion factor.
-            use_dynamic_graph: Whether to build a learned adjacency per step.
-            heads: Number of heads for graph attention scoring.
-            gpt_channel: Intermediate channel dimension.
-            backbone_channel: Backbone feature channel dimension.
-            time_steps: Number of time steps for temporal embedding.
-            p_keep: Fraction of edges to retain after thresholding.
-            mix_hi: Initial blend weight for fixed adjacency during warmup.
-            mix_lo: Final blend weight for fixed adjacency after warmup.
+        """
+        Initializes a mode-specific processor that combines spatial and temporal patterns.
         """
         super().__init__()
-
-        self.adj_mx = torch.tensor(adj_mx, dtype=torch.float32).to(device)
+        self.adj_mx = torch.tensor(static_road_network, dtype=torch.float32).to(device)
         self.input_dim = input_dim
         self.num_nodes = num_nodes
+        self.output_len = output_len
         self.use_dynamic_graph = use_dynamic_graph
 
         self.heads = heads
@@ -82,17 +77,15 @@ class ModeProcessor(nn.Module):
         self.mix_hi = mix_hi
         self.mix_lo = mix_lo
         
-        # Store temporal and channel dimensions as instance attributes
         self.input_len = input_len
         self.gpt_channel = gpt_channel
         self.backbone_channel = backbone_channel
-        self.time_steps = time_steps
+        self.time_steps = self.DEFAULT_TIME_STEPS
 
         self.register_buffer("global_step", torch.zeros((), dtype=torch.long))
         self.register_buffer("ema_A", torch.zeros((num_nodes, num_nodes)))
         self.register_buffer("prev_A", torch.zeros((num_nodes, num_nodes)))
         
-        # Pre-compute normalized adjacency matrix to avoid redundant computation
         binary_adj = (self.adj_mx > 0).float()
         self.register_buffer(
             "norm_adj_mx",
@@ -111,19 +104,13 @@ class ModeProcessor(nn.Module):
         self.hysteresis_ratio = self.DEFAULT_HYSTERESIS_RATIO
         self.warmup_steps = self.DEFAULT_WARMUP_STEPS
 
-        self.start_conv = nn.Conv2d(input_dim * input_len, gpt_channel, kernel_size=(1, 1))
-        self.temporal_embedding = TemporalEmbedding(time_steps, gpt_channel)
-        self.node_emb = nn.Parameter(torch.empty(num_nodes, gpt_channel))
-        nn.init.xavier_uniform_(self.node_emb)
+        self.feature_encoder = nn.Conv2d(input_dim * input_len, gpt_channel, kernel_size=(1, 1))
+        self.temporal_embedding = TemporalEmbedding(self.time_steps, gpt_channel)
+        self.node_identity_emb = nn.Parameter(torch.empty(num_nodes, gpt_channel))
+        nn.init.xavier_uniform_(self.node_identity_emb)
 
-        # Verify channel scaling consistency
-        assert backbone_channel == gpt_channel * 3, (
-            f"backbone_channel ({backbone_channel}) must equal 3 * gpt_channel ({gpt_channel * 3})"
-        )
-        
         self.input_projection = nn.Conv2d(gpt_channel * 3, backbone_channel, kernel_size=(1, 1))
         self.feature_norm = nn.LayerNorm(backbone_channel)
-        # Separate LayerNorm for temporal features to avoid interference
         self.temporal_feature_norm = nn.LayerNorm(backbone_channel)
 
         self.gat_q = nn.Linear(backbone_channel, backbone_channel, bias=False)
@@ -189,21 +176,11 @@ class ModeProcessor(nn.Module):
         return self.mix_hi + (self.mix_lo - self.mix_hi) * progress
 
     def _calculate_node_importance(self, graph_scores: torch.Tensor) -> torch.Tensor:
-        """Weights nodes based on their relative connectivity (degree) in the graph."""
         importance = graph_scores.sum(dim=-1, keepdim=True)
         max_importance = importance.max() + 1e-6
         return importance / max_importance
 
     def _generate_adaptive_graph(self, features: torch.Tensor) -> torch.Tensor:
-        """
-        Generates a custom, dynamic graph structure based on current traffic features.
-
-        Args:
-            features: Current node states in [Batch, Nodes, Dimension].
-
-        Returns:
-            A binary connectivity matrix [Nodes, Nodes].
-        """
         _, num_nodes, _ = features.shape
         mix_alpha = self._get_blending_ratio()
 
@@ -261,7 +238,6 @@ class ModeProcessor(nn.Module):
         if self.symmetrize:
             graph_binary = torch.maximum(graph_binary, graph_binary.t())
 
-        # Confidence-based hysteresis to maintain graph stability over time
         row_mean = working_scores.mean(dim=-1, keepdim=True)
         low_confidence_mask = (working_scores < (row_mean * self.hysteresis_ratio)).float()
         keep_previous_edges = self.prev_A * (1.0 - low_confidence_mask)
@@ -269,7 +245,6 @@ class ModeProcessor(nn.Module):
         self.prev_A = graph_binary.detach()
 
         self.global_step += 1
-        # During warmup, strictly enforce the static physical road network
         if self.global_step.item() < self.warmup_steps:
             graph_binary = torch.maximum(graph_binary, self.binary_adj_mx)
 
@@ -282,21 +257,22 @@ class ModeProcessor(nn.Module):
 
         temporal_embedding = self.temporal_embedding(input_tensor)
         node_embedding = (
-            self.node_emb.unsqueeze(0).expand(batch_size, -1, -1).transpose(1, 2).unsqueeze(-1)
+            self.node_identity_emb.unsqueeze(0).expand(batch_size, -1, -1).transpose(1, 2).unsqueeze(-1)
         )
 
-        # Reshape input to [B, T*F, N, 1] for conv2d
-        # Permute: (B, T, N, F) -> (B, F, N, T), then reshape to (B, F*T, N, 1)
-        flattened_input = input_tensor.permute(0, 3, 2, 1).reshape(batch_size, self.input_dim * self.input_len, num_nodes, 1)
-        flattened_input = self.start_conv(flattened_input)
+        value_features = input_tensor.permute(0, 3, 2, 1).reshape(
+            batch_size, self.input_dim * self.input_len, num_nodes, 1
+        )
+        value_features = self.feature_encoder(value_features)
 
-        spatiotemporal_features = torch.cat([flattened_input, temporal_embedding, node_embedding], dim=1)
-        spatiotemporal_features = self.input_projection(spatiotemporal_features)
+        fused_features = torch.cat(
+            [value_features, temporal_embedding, node_embedding], dim=1
+        )
+        spatiotemporal_features = self.input_projection(fused_features)
         spatiotemporal_features = F.leaky_relu(spatiotemporal_features).permute(0, 2, 1, 3).squeeze(-1)
         spatiotemporal_features = self.feature_norm(spatiotemporal_features)
 
         temporal_features = self._extract_temporal_patterns(input_tensor)
-        # Use separate LayerNorm for temporal features to avoid interference
         temporal_gate = torch.sigmoid(self.temporal_gate(self.temporal_feature_norm(temporal_features)))
         fused_features = spatiotemporal_features + temporal_gate * temporal_features
 
@@ -311,44 +287,45 @@ class ModeProcessor(nn.Module):
 
 
 class DGLLM(nn.Module):
-    # Residual connection scaling coefficient
-    RESIDUAL_SCALE = 0.06  # Optuna Bayesian optimized
+    # Final Optimized Residual Connection Scaling
+    RESIDUAL_SCALE = 0.13
     
     def __init__(
         self,
         device,
-        adj_mx,
-        input_dim=3,
-        num_nodes=266,
-        input_len=12,
-        output_len=12,
-        llm_layer=6,
-        U=1,
-        vmd_K=3,
+        static_road_network,
+        input_dim,
+        num_nodes,
+        input_len,
+        output_len,
+        llm_layer,
+        U,
+        vmd_K,
         use_attention_fusion=True,
     ):
-        """Initialize the multi-mode DG-LLM forecasting model.
-
+        """
+        Initializes the multi-mode DG-LLM forecasting model.
+        
         Args:
             device: Target torch device.
-            adj_mx: Static adjacency matrix prior.
-            input_dim: Number of input features per node and time step.
-            num_nodes: Number of graph nodes.
-            input_len: Number of historical time steps.
-            output_len: Forecast horizon.
-            llm_layer: Number of backbone layers in each mode processor.
-            U: Backbone expansion factor.
-            vmd_K: Number of VMD modes.
-            use_attention_fusion: Whether to fuse modes with attention.
+            static_road_network: Static graph prior (physical road network).
+            input_dim: Number of input features per node.
+            num_nodes: Number of nodes in the graph.
+            input_len: Historical window size.
+            output_len: Prediction horizon.
+            llm_layer: Total transformer layers per mode.
+            U: Number of top layers to remain trainable in the backbone.
+            vmd_K: Number of VMD frequency modes to process.
+            use_attention_fusion: If True, uses attention to blend modes.
         """
         super().__init__()
         self.use_attention_fusion = use_attention_fusion
 
-        self.mode_models = nn.ModuleList(
+        self.mode_processors = nn.ModuleList(
             [
                 ModeProcessor(
                     device,
-                    adj_mx,
+                    static_road_network,
                     input_dim,
                     num_nodes,
                     input_len,
@@ -362,12 +339,14 @@ class DGLLM(nn.Module):
         )
 
         if use_attention_fusion:
+            # Multi-mode attention fusion parameters
             self.fusion_query = nn.Linear(output_len, output_len)
             self.fusion_key = nn.Linear(output_len, output_len)
         else:
-            self.mode_weights = nn.Parameter(torch.ones(vmd_K) / vmd_K)
+            # Simple weighted average parameters
+            self.mode_blending_weights = nn.Parameter(torch.ones(vmd_K) / vmd_K)
 
-        self.residual_proj = nn.Sequential(
+        self.flow_residual_projection = nn.Sequential(
             nn.Linear(input_len, output_len),
             nn.LayerNorm(output_len),
             nn.ReLU(),
@@ -384,31 +363,32 @@ class DGLLM(nn.Module):
         Returns:
             A tuple of (final_forecast, learned_graph_structures).
         """
-        _, num_modes, _, _, _ = vmd_data.shape
+        _, vmd_K, _, _, _ = vmd_data.shape
         time_features = original_input[..., 1:]
 
         mode_predictions = []
         learned_graphs = []
-        for mode_index in range(num_modes):
+        for mode_index in range(vmd_K):
             mode_flow = vmd_data[:, mode_index, ...]
             mode_input = torch.cat([mode_flow, time_features], dim=-1)
 
-            prediction, adjacency = self.mode_models[mode_index](mode_input)
+            prediction, learned_graph = self.mode_processors[mode_index](mode_input)
             mode_predictions.append(prediction)
-            learned_graphs.append(adjacency)
+            learned_graphs.append(learned_graph)
 
         if self.use_attention_fusion:
             final_prediction = self._blend_modes(mode_predictions)
         else:
-            mode_weights = F.softmax(self.mode_weights, dim=0)
+            weights = F.softmax(self.mode_blending_weights, dim=0)
             final_prediction = sum(
-                mode_predictions[mode_index] * mode_weights[mode_index]
-                for mode_index in range(num_modes)
+                mode_predictions[mode_index] * weights[mode_index]
+                for mode_index in range(vmd_K)
             )
 
-        residual = original_input[..., 0].permute(0, 2, 1)
-        residual = self.residual_proj(residual).permute(0, 2, 1).unsqueeze(-1)
-        final_prediction = final_prediction + self.RESIDUAL_SCALE * residual
+        # Baseline Flow Residual Connection
+        flow_residual = original_input[..., 0].permute(0, 2, 1)
+        flow_residual = self.flow_residual_projection(flow_residual).permute(0, 2, 1).unsqueeze(-1)
+        final_prediction = final_prediction + self.RESIDUAL_SCALE * flow_residual
 
         return final_prediction, learned_graphs
 

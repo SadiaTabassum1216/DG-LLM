@@ -6,17 +6,37 @@ import numpy as np
 
 from data_loader import load_dataset
 from model import DGLLM
-from utils import seed_everything, load_pickle
+from utils import seed_everything, load_pickle, Ranger
 
 def create_model(trial, args, device, adj_mx):
-    # Sample final hyperparameters
-    warmup_steps = trial.suggest_int("warmup_steps", 100, 1000)
-    degree_prior_base = trial.suggest_float("degree_prior_base", 0.1, 1.0)
-    degree_prior_scale = trial.suggest_float("degree_prior_scale", 0.0, 1.0)
-        
+    # --- Consolidated Hyperparameter Sampling ---
+    
+    # 1. Graph Pruning & Stability
+    p_keep = trial.suggest_float("p_keep", 0.01, 0.2)
+    hysteresis_ratio = trial.suggest_float("hysteresis_ratio", 0.5, 0.95)
+    edge_dropout = trial.suggest_float("edge_dropout", 0.0, 0.4)
+    
+    # 2. Graph Attention Scoring
+    gat_tau = trial.suggest_float("gat_tau", 0.5, 1.5)
+    head_dropout = trial.suggest_float("head_dropout", 0.0, 0.5)
+    leaky_slope = trial.suggest_float("leaky_slope", 0.1, 0.4)
+    
+    # 3. Adaptive Graph Blending & EMA
+    mix_hi = trial.suggest_float("mix_hi", 0.7, 1.0)
+    mix_lo = trial.suggest_float("mix_lo", 0.3, 0.7)
+    ema_m = trial.suggest_float("ema_m", 0.8, 0.99)
+    warmup_steps = trial.suggest_int("warmup_steps", 100, 2000)
+    
+    # 4. Node Importance & Priors
+    degree_prior_base = trial.suggest_float("degree_prior_base", 0.1, 0.8)
+    degree_prior_scale = trial.suggest_float("degree_prior_scale", 0.1, 1.0)
+    
+    # 5. Global Residual Scale
+    residual_scale = trial.suggest_float("RESIDUAL_SCALE", 0.01, 0.2)
+
     model = DGLLM(
         device=device,
-        adj_mx=adj_mx,
+        static_road_network=adj_mx,
         input_dim=args.input_dim,
         num_nodes=args.num_nodes,
         input_len=args.input_len,
@@ -27,8 +47,20 @@ def create_model(trial, args, device, adj_mx):
         use_attention_fusion=True,
     ).to(device)
     
-    # Inject hyperparameters into each mode processor
-    for mode_proc in model.mode_models:
+    # Apply Global Residual Scale
+    model.RESIDUAL_SCALE = residual_scale
+    
+    # Inject spatial and temporal hyperparameters into each mode processor
+    for mode_proc in model.mode_processors:
+        mode_proc.p_keep = p_keep
+        mode_proc.hysteresis_ratio = hysteresis_ratio
+        mode_proc.edge_dropout = edge_dropout
+        mode_proc.gat_tau = gat_tau
+        mode_proc.head_dropout = head_dropout
+        mode_proc.leaky_slope = leaky_slope
+        mode_proc.mix_hi = mix_hi
+        mode_proc.mix_lo = mix_lo
+        mode_proc.ema_m = ema_m
         mode_proc.warmup_steps = warmup_steps
         mode_proc.DEGREE_PRIOR_BASE = degree_prior_base
         mode_proc.DEGREE_PRIOR_SCALE = degree_prior_scale
@@ -38,7 +70,7 @@ def create_model(trial, args, device, adj_mx):
 def objective(trial, args, device, train_loader, val_loader, scaler, adj_mx):
     print(f"\n--- Starting Trial {trial.number} ---")
     model = create_model(trial, args, device, adj_mx)
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    optimizer = Ranger(model.parameters(), lr=1e-3)
     
     max_train_batches = 5
     max_val_batches = 2

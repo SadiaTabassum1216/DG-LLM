@@ -3,33 +3,47 @@ import torch.nn as nn
 
 class TemporalEmbedding(nn.Module):
     """
-    Learnable temporal embeddings for time-of-day and day-of-week.
+    Provides learnable embeddings for periodic temporal patterns (Time-of-Day and Day-of-Week).
     
     Args:
-        time: Number of time slots per day (288 for 5-min, 48 for 30-min)
-        features: Embedding dimension
+        daily_intervals: Number of time slots in a single day (e.g., 288 for 5-min intervals).
+        embedding_dim: Dimension of the resulting feature vector.
     """
-    def __init__(self, time, features):
+    def __init__(self, daily_intervals, embedding_dim):
         super().__init__()
-        self.time = time
-        self.time_day = nn.Parameter(torch.empty(time, features))
-        self.time_week = nn.Parameter(torch.empty(7, features))
-        nn.init.xavier_uniform_(self.time_day)
-        nn.init.xavier_uniform_(self.time_week)
+        self.daily_intervals = daily_intervals
+        self.time_day_emb = nn.Parameter(torch.empty(daily_intervals, embedding_dim))
+        self.time_week_emb = nn.Parameter(torch.empty(7, embedding_dim))
+        
+        nn.init.xavier_uniform_(self.time_day_emb)
+        nn.init.xavier_uniform_(self.time_week_emb)
 
-    def forward(self, x):
-        _, _, _, _ = x.shape
+    def forward(self, input_tensor):
+        """
+        Extracts temporal context from the last timestep of the input sequence.
         
-        # Use LAST timestep's temporal features (correct for prediction)
-        day_emb = x[:, -1, :, 1]   # [B, N]
-        week_emb = x[:, -1, :, 2]  # [B, N]
+        Args:
+            input_tensor: [Batch, Time, Nodes, Features]
+            
+        Returns:
+            Combined temporal embeddings: [Batch, Dimension, Nodes, 1]
+        """
+        # Extract features for the most recent timestep
+        # Feature 1: Time of Day (normalized 0-1)
+        # Feature 2: Day of Week (integer 0-6)
+        tod_raw = input_tensor[:, -1, :, 1]   
+        dow_raw = input_tensor[:, -1, :, 2]  
         
-        # Index with clamping
-        day_idx = (day_emb * self.time).long().clamp(0, self.time - 1)
-        week_idx = week_emb.long().clamp(0, 6)
+        # Convert floating point features to discrete embedding indices
+        tod_idx = (tod_raw * self.daily_intervals).long().clamp(0, self.daily_intervals - 1)
+        dow_idx = dow_raw.long().clamp(0, 6)
         
-        time_day_emb = self.time_day[day_idx]    # [B, N, D]
-        time_week_emb = self.time_week[week_idx] # [B, N, D]
+        # Look up embeddings
+        tod_embedding = self.time_day_emb[tod_idx]    # [Batch, Nodes, Dimension]
+        dow_embedding = self.time_week_emb[dow_idx]   # [Batch, Nodes, Dimension]
         
-        combined = time_day_emb + time_week_emb
-        return combined.transpose(1, 2).unsqueeze(-1)  # [B, D, N, 1]
+        # Fuse the two temporal contexts
+        fused_temporal_context = tod_embedding + dow_embedding
+        
+        # Reshape to match the spatial feature layout: [Batch, Dimension, Nodes, 1]
+        return fused_temporal_context.transpose(1, 2).unsqueeze(-1)
