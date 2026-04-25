@@ -14,17 +14,17 @@ class ModeProcessor(nn.Module):
     # Configuration constants for channel dimensions
     DEFAULT_TIME_STEPS = 288  # PEMS uses 5-minute intervals
     DEFAULT_GPT_CHANNEL = 256
-    DEFAULT_BACKBONE_CHANNEL = 768  # Should be 3 * gpt_channel
+    DEFAULT_BACKBONE_CHANNEL = 768  # 3 * gpt_channel
     
     # Hyperparameters for graph attention and adjacency learning
-    DEFAULT_HEAD_DROPOUT = 0.1
-    DEFAULT_LEAKY_SLOPE = 0.30  # Optuna Bayesian optimized (was 0.05)
-    DEFAULT_GAT_TAU = 1.0
-    DEFAULT_EMA_M = 0.90  # Optuna Bayesian optimized (was 0.97)
+    DEFAULT_HEAD_DROPOUT = 0.31  # Optuna Bayesian optimized
+    DEFAULT_LEAKY_SLOPE = 0.30  # Optuna Bayesian optimized 
+    DEFAULT_GAT_TAU = 1.03  # Optuna Bayesian optimized
+    DEFAULT_EMA_M = 0.90  # Optuna Bayesian optimized 
     DEFAULT_EPSILON = 1e-6
-    DEFAULT_EDGE_DROPOUT = 0.1
+    DEFAULT_EDGE_DROPOUT = 0.11  # Optuna Bayesian optimized
     DEFAULT_SYMMETRIZE = True
-    DEFAULT_HYSTERESIS_RATIO = 0.8
+    DEFAULT_HYSTERESIS_RATIO = 0.85  # Optuna Bayesian optimized
     DEFAULT_WARMUP_STEPS = 500
     
     # Degree prior scaling coefficients
