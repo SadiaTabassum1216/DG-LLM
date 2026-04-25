@@ -112,7 +112,7 @@ class Trainer:
         if accumulation_step == 0:
             self.optimizer.zero_grad(set_to_none=True)
 
-        x_in = x.permute(0, 3, 2, 1)
+        x_in = x
 
         ctx = (
             torch.amp.autocast("cuda", dtype=self.amp_dtype)
@@ -121,9 +121,8 @@ class Trainer:
         )
         with ctx:
             preds, _ = self.model(vmd_data, x_in)
-            preds = preds.transpose(1, 3)
             preds_scaled = self.scaler.inverse_transform(preds)
-            real_scaled = torch.unsqueeze(y_real, 1)
+            real_scaled = y_real
             loss = self.loss_fn(preds_scaled, real_scaled, 0.0)
 
         loss = loss / self.grad_accum_steps
@@ -150,7 +149,7 @@ class Trainer:
     def eval(self, x, y_real, vmd_data):
         """Run one evaluation step and return aggregate metrics."""
         self.model.eval()
-        x_in = x.permute(0, 3, 2, 1)
+        x_in = x
 
         ctx = (
             torch.amp.autocast("cuda", dtype=self.amp_dtype)
@@ -160,9 +159,8 @@ class Trainer:
         with torch.no_grad(), ctx:
             preds, _ = self.model(vmd_data, x_in)
 
-        preds = preds.transpose(1, 3)
         preds_scaled = self.scaler.inverse_transform(preds)
-        real_scaled = torch.unsqueeze(y_real, 1)
+        real_scaled = y_real
 
         loss = self.loss_fn(preds_scaled, real_scaled, 0.0).item()
         metrics = compute_metrics(preds_scaled, real_scaled)
@@ -183,16 +181,16 @@ class Trainer:
         print(">> Starting Detailed Horizon Evaluation...")
 
         for x, y, vmd in tqdm(test_loader.get_iterator(), desc="Testing"):
-            tx = x.to(self.device, non_blocking=True).transpose(1, 3)
-            ty = y.to(self.device, non_blocking=True).transpose(1, 3)[:, 0, :, :]
+            tx = x.to(self.device, non_blocking=True)
+            ty = y.to(self.device, non_blocking=True)
             tvmd = vmd.to(self.device, non_blocking=True)
 
-            x_in = tx.permute(0, 3, 2, 1)
+            x_in = tx
             with torch.no_grad():
                 preds, _ = self.model(tvmd, x_in)
 
             preds_scaled = self.scaler.inverse_transform(preds)
-            real_scaled = ty.permute(0, 2, 1).unsqueeze(-1)
+            real_scaled = ty
 
             for t in range(self.args.output_len):
                 p = preds_scaled[:, t, ...]

@@ -167,8 +167,8 @@ def main():
             num_train_batches = len(train_loader)
 
             for batch_idx, (x, y, vmd) in enumerate(train_loader.get_iterator()):
-                tx = x.to(args.device, non_blocking=True).transpose(1, 3)
-                ty = y.to(args.device, non_blocking=True).transpose(1, 3)[:, 0, :, :]
+                tx = x.to(args.device, non_blocking=True)
+                ty = y.to(args.device, non_blocking=True)
                 tvmd = vmd.to(args.device, non_blocking=True)
 
                 # Handle gradient accumulation by using minibatches
@@ -194,8 +194,8 @@ def main():
             val_metrics = []
             
             for x, y, vmd in data['val_loader'].get_iterator():
-                tx = x.to(args.device, non_blocking=True).transpose(1, 3)
-                ty = y.to(args.device, non_blocking=True).transpose(1, 3)[:, 0, :, :]
+                tx = x.to(args.device, non_blocking=True)
+                ty = y.to(args.device, non_blocking=True)
                 tvmd = vmd.to(args.device, non_blocking=True)
                 
                 loss, metrics = trainer.eval(tx, ty, tvmd)
@@ -273,14 +273,14 @@ def main():
         
         with torch.no_grad():
             for x, y, vmd in tqdm(data['test_loader'].get_iterator(), desc="Evaluating"):
-                tx = x.to(args.device, non_blocking=True).transpose(1, 3)
-                ty = y.to(args.device, non_blocking=True).transpose(1, 3)[:, 0, :, :]
+                tx = x.to(args.device, non_blocking=True)
+                ty = y.to(args.device, non_blocking=True)
                 tvmd = vmd.to(args.device, non_blocking=True)
-                x_in = tx.permute(0, 3, 2, 1)  # [B, T, N, F]
+                x_in = tx  # BTNF
                 
                 pred, _ = trainer.model(tvmd, x_in)
                 preds_unscaled = data['scaler'].inverse_transform(pred)
-                reals_unscaled = data['scaler'].inverse_transform(ty.permute(0, 2, 1).unsqueeze(-1))
+                reals_unscaled = data['scaler'].inverse_transform(ty)
                 
                 all_preds.append(preds_unscaled)
                 all_reals.append(reals_unscaled)

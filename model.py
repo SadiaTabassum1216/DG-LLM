@@ -150,9 +150,9 @@ class ModeProcessor(nn.Module):
     def ensure_btnf_layout(self, input_tensor: torch.Tensor) -> torch.Tensor:
         """
         Normalize inputs to [B, T, N, F] layout.
-
-        Accepts legacy [B, F, N, T] and converts it to [B, T, N, F].
+        This primarily serves as a safety check now that the pipeline is harmonized.
         """
+        # If input is [B, F, N, T], convert to [B, T, N, F]
         if input_tensor.dim() == 4 and input_tensor.shape[1] == self.input_dim:
             return input_tensor.permute(0, 3, 2, 1).contiguous()
         return input_tensor

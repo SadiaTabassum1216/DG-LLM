@@ -49,18 +49,18 @@ def objective(trial, args, device, train_loader, val_loader, scaler, adj_mx):
     batches_processed = 0
     
     for batch_x, batch_y, batch_vmd in train_loader.get_iterator():
-        tx = batch_x.to(device, non_blocking=True).transpose(1, 3)
-        ty = batch_y.to(device, non_blocking=True).transpose(1, 3)[:, 0, :, :]
+        tx = batch_x.to(device, non_blocking=True)
+        ty = batch_y.to(device, non_blocking=True)
         tvmd = batch_vmd.to(device, non_blocking=True)
         
-        x_in = tx.permute(0, 3, 2, 1)
+        x_in = tx
         
         optimizer.zero_grad()
         prediction, _ = model(tvmd, x_in)
         
         # Scale back to calculate loss
         pred_scaled = scaler.inverse_transform(prediction)
-        real_scaled = ty.permute(0, 2, 1).unsqueeze(-1)
+        real_scaled = ty
         loss = torch.nn.functional.l1_loss(pred_scaled, real_scaled)
         
         loss.backward()
@@ -81,15 +81,15 @@ def objective(trial, args, device, train_loader, val_loader, scaler, adj_mx):
     
     with torch.no_grad():
         for batch_x, batch_y, batch_vmd in val_loader.get_iterator():
-            tx = batch_x.to(device, non_blocking=True).transpose(1, 3)
-            ty = batch_y.to(device, non_blocking=True).transpose(1, 3)[:, 0, :, :]
+            tx = batch_x.to(device, non_blocking=True)
+            ty = batch_y.to(device, non_blocking=True)
             tvmd = batch_vmd.to(device, non_blocking=True)
             
-            x_in = tx.permute(0, 3, 2, 1)
+            x_in = tx
             prediction, _ = model(tvmd, x_in)
             
             pred_scaled = scaler.inverse_transform(prediction)
-            real_scaled = ty.permute(0, 2, 1).unsqueeze(-1)
+            real_scaled = ty
             loss = torch.nn.functional.l1_loss(pred_scaled, real_scaled)
             
             val_loss += loss.item()
