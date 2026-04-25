@@ -63,6 +63,16 @@ class GraphBiasGPT2Attention(GPT2Attention):
 
         return self._cached_causal_bias.to(device=device, dtype=dtype).view(1, 1, query_len, key_len)
 
+    def _split_heads(self, tensor, num_heads, attn_head_size):
+        new_shape = tensor.size()[:-1] + (num_heads, attn_head_size)
+        tensor = tensor.view(*new_shape)
+        return tensor.permute(0, 2, 1, 3)
+
+    def _merge_heads(self, tensor, num_heads, attn_head_size):
+        tensor = tensor.permute(0, 2, 1, 3).contiguous()
+        new_shape = tensor.size()[:-2] + (num_heads * attn_head_size,)
+        return tensor.view(*new_shape)
+
     def forward(
         self,
         hidden_states: torch.Tensor,

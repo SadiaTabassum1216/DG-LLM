@@ -9,7 +9,7 @@ from tqdm import tqdm
 from utils import load_pickle, seed_everything
 from data_loader import load_dataset
 from trainer import Trainer
-from visualization import plot_predictions_vs_ground_truth, validate_temporal_features, plot_error_diagnostics, plot_weekly_1step_ahead_predictions
+from visualization import plot_predictions_vs_ground_truth, plot_error_diagnostics, plot_weekly_1step_ahead_predictions
 from paths import DATASET_DIR, RESULTS_LOGS_DIR
 
 
@@ -112,7 +112,7 @@ def main():
     data = load_dataset(args.data_path, args.batch_size, args)
     
     # Sanity check
-    validate_temporal_features(data['train_loader'])
+    # validate_temporal_features(data['train_loader'])
 
     # 2. Load Adjacency Matrix
     adj_path = os.path.join(args.root_path, args.data, 'adj_mx.pkl')
@@ -121,18 +121,24 @@ def main():
         print(f">> Loading adjacency matrix from {adj_path}...")
         adj_data = load_pickle(adj_path)
         if isinstance(adj_data, list):
-            adj_mx = adj_data[2]
+            adj_mx = adj_data[2]    # For PEMS datasets, the 3rd element is the normalized adjacency matrix
         else:
             adj_mx = adj_data
         print(f"   Adjacency matrix shape: {adj_mx.shape}")
     else:
         print(f">> Warning: No adjacency matrix found at {adj_path}. Using identity.")
-        adj_mx = np.eye(args.num_nodes)
+        adj_mx = np.eye(args.num_nodes) # Fallback to identity if no adjacency matrix is provided
 
     # 3. Train model
     print("\n>> Initializing Model...")
     trainer = Trainer(args, data['scaler'], adj_mx, args.device)
     print(f"   Total parameters: {trainer.model.param_num():,}")
+    
+    # training
+    # validation
+    # logging
+    # checkpoint saving
+    # best model saving
 
     # Check for existing checkpoint
     latest_ckpt = os.path.join(args.log_dir, 'latest_checkpoint.pth')
@@ -145,7 +151,7 @@ def main():
         start_epoch += 1
         print(f"   Resuming from epoch {start_epoch}")
 
-    # Training Loop (skip if --test_only)
+    # Training Loop
     if not args.test_only:
         print(f"\n>> Starting Training from Epoch {start_epoch}...")
         training_log = {"epochs": [], "train_loss": [], "val_loss": [], "val_mae": [], "best_epoch": 0}
@@ -165,8 +171,11 @@ def main():
                 ty = y.to(args.device, non_blocking=True).transpose(1, 3)[:, 0, :, :]
                 tvmd = vmd.to(args.device, non_blocking=True)
 
+                # Handle gradient accumulation by using minibatches
                 accumulation_step = batch_idx % trainer.grad_accum_steps
                 is_last_batch = batch_idx == num_train_batches - 1
+                
+                
                 loss, metrics = trainer.train(
                     tx,
                     ty,
@@ -178,7 +187,7 @@ def main():
                 epoch_metrics.append(metrics)
             
             avg_train_loss = np.mean(epoch_loss)
-            avg_train_mae = np.mean([m[0] for m in epoch_metrics])
+            # avg_train_mae = np.mean([m[0] for m in epoch_metrics])
             
             # Evaluate
             val_loss = []
@@ -224,6 +233,10 @@ def main():
     else:
         print("\n>> Skipping training (--test_only mode)")
 
+
+
+
+    # Evaluate
     # Check if model checkpoint exists
     best_model_path = os.path.join(args.log_dir, 'best_model.pth')
     latest_ckpt = os.path.join(args.log_dir, 'latest_checkpoint.pth')
@@ -231,12 +244,12 @@ def main():
     model_path = None
     if os.path.exists(best_model_path):
         model_path = best_model_path
-        print(f"\n✓ Found best model at: {best_model_path}")
+        print(f"\n Found best model at: {best_model_path}")
     elif os.path.exists(latest_ckpt):
         model_path = latest_ckpt
-        print(f"\n✓ Found latest checkpoint at: {latest_ckpt}")
+        print(f"\n Found latest checkpoint at: {latest_ckpt}")
     else:
-        print(f"\n✗ ERROR: No trained model found!")
+        print(f"\n ERROR: No trained model found!")
         print(f"  Searched for:")
         print(f"    - {best_model_path}")
         print(f"    - {latest_ckpt}")

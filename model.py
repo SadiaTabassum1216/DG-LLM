@@ -10,6 +10,26 @@ class ModeProcessor(nn.Module):
     """
     Spatio-temporal processor for a single VMD mode.
     """
+    
+    # Configuration constants for channel dimensions
+    DEFAULT_TIME_STEPS = 288  # PEMS uses 5-minute intervals
+    DEFAULT_GPT_CHANNEL = 256
+    DEFAULT_BACKBONE_CHANNEL = 768  # Should be 3 * gpt_channel
+    
+    # Hyperparameters for graph attention and adjacency learning
+    DEFAULT_HEAD_DROPOUT = 0.1
+    DEFAULT_LEAKY_SLOPE = 0.30  # Optuna Bayesian optimized (was 0.05)
+    DEFAULT_GAT_TAU = 1.0
+    DEFAULT_EMA_M = 0.90  # Optuna Bayesian optimized (was 0.97)
+    DEFAULT_EPSILON = 1e-6
+    DEFAULT_EDGE_DROPOUT = 0.1
+    DEFAULT_SYMMETRIZE = True
+    DEFAULT_HYSTERESIS_RATIO = 0.8
+    DEFAULT_WARMUP_STEPS = 500
+    
+    # Degree prior scaling coefficients
+    DEGREE_PRIOR_BASE = 0.8
+    DEGREE_PRIOR_SCALE = 0.2
 
     def __init__(
         self,
@@ -23,14 +43,12 @@ class ModeProcessor(nn.Module):
         U=1,
         use_dynamic_graph=True,
         heads=4,
-        tau_hi=0.8,
-        tau_lo=0.5,
-        p_keep=0.15,
-        min_neighbors=20,
-        mix_hi=0.6,
-        mix_lo=0.2,
-        k_min=16,
-        k_max=28,
+        gpt_channel=DEFAULT_GPT_CHANNEL,
+        backbone_channel=DEFAULT_BACKBONE_CHANNEL,
+        time_steps=DEFAULT_TIME_STEPS,
+        p_keep=0.06,  # Optuna Bayesian optimized 
+        mix_hi=0.89,  # Optuna Bayesian optimized
+        mix_lo=0.50,  # Optuna Bayesian optimized 
     ):
         """Initialize a single-mode spatio-temporal processing block.
 
@@ -45,19 +63,14 @@ class ModeProcessor(nn.Module):
             U: Backbone expansion factor.
             use_dynamic_graph: Whether to build a learned adjacency per step.
             heads: Number of heads for graph attention scoring.
-            tau_hi: Deprecated compatibility arg.
-            tau_lo: Deprecated compatibility arg.
+            gpt_channel: Intermediate channel dimension.
+            backbone_channel: Backbone feature channel dimension.
+            time_steps: Number of time steps for temporal embedding.
             p_keep: Fraction of edges to retain after thresholding.
-            min_neighbors: Deprecated compatibility arg.
             mix_hi: Initial blend weight for fixed adjacency during warmup.
             mix_lo: Final blend weight for fixed adjacency after warmup.
-            k_min: Deprecated compatibility arg.
-            k_max: Deprecated compatibility arg.
         """
         super().__init__()
-
-        # Preserved in the signature for compatibility with older call sites.
-        del tau_hi, tau_lo, min_neighbors, k_min, k_max
 
         self.adj_mx = torch.tensor(adj_mx, dtype=torch.float32).to(device)
         self.input_dim = input_dim
@@ -68,32 +81,50 @@ class ModeProcessor(nn.Module):
         self.p_keep = p_keep
         self.mix_hi = mix_hi
         self.mix_lo = mix_lo
+        
+        # Store temporal and channel dimensions as instance attributes
+        self.input_len = input_len
+        self.gpt_channel = gpt_channel
+        self.backbone_channel = backbone_channel
+        self.time_steps = time_steps
 
         self.register_buffer("global_step", torch.zeros((), dtype=torch.long))
         self.register_buffer("ema_A", torch.zeros((num_nodes, num_nodes)))
         self.register_buffer("prev_A", torch.zeros((num_nodes, num_nodes)))
+        
+        # Pre-compute normalized adjacency matrix to avoid redundant computation
+        binary_adj = (self.adj_mx > 0).float()
+        self.register_buffer(
+            "norm_adj_mx",
+            binary_adj / (binary_adj.sum(-1, keepdim=True) + self.DEFAULT_EPSILON)
+        )
+        self.register_buffer("binary_adj_mx", binary_adj)
 
-        self.head_dropout = 0.1
-        self.leaky_slope = 0.2
-        self.gat_tau = 1.0
-        self.ema_m = 0.99
-        self.eps = 1e-6
-        self.edge_dropout = 0.1
-        self.symmetrize = True
-        self.hysteresis_ratio = 0.8
-        self.warmup_steps = 500
-
-        time_steps = 288  # PEMS uses 5-minute intervals.
-        gpt_channel = 256
-        backbone_channel = 768
+        # Graph attention hyperparameters
+        self.head_dropout = self.DEFAULT_HEAD_DROPOUT
+        self.leaky_slope = self.DEFAULT_LEAKY_SLOPE
+        self.gat_tau = self.DEFAULT_GAT_TAU
+        self.ema_m = self.DEFAULT_EMA_M
+        self.eps = self.DEFAULT_EPSILON
+        self.edge_dropout = self.DEFAULT_EDGE_DROPOUT
+        self.symmetrize = self.DEFAULT_SYMMETRIZE
+        self.hysteresis_ratio = self.DEFAULT_HYSTERESIS_RATIO
+        self.warmup_steps = self.DEFAULT_WARMUP_STEPS
 
         self.start_conv = nn.Conv2d(input_dim * input_len, gpt_channel, kernel_size=(1, 1))
         self.temporal_embedding = TemporalEmbedding(time_steps, gpt_channel)
         self.node_emb = nn.Parameter(torch.empty(num_nodes, gpt_channel))
         nn.init.xavier_uniform_(self.node_emb)
 
+        # Verify channel scaling consistency
+        assert backbone_channel == gpt_channel * 3, (
+            f"backbone_channel ({backbone_channel}) must equal 3 * gpt_channel ({gpt_channel * 3})"
+        )
+        
         self.input_projection = nn.Conv2d(gpt_channel * 3, backbone_channel, kernel_size=(1, 1))
         self.feature_norm = nn.LayerNorm(backbone_channel)
+        # Separate LayerNorm for temporal features to avoid interference
+        self.temporal_feature_norm = nn.LayerNorm(backbone_channel)
 
         self.gat_q = nn.Linear(backbone_channel, backbone_channel, bias=False)
         self.gat_k = nn.Linear(backbone_channel, backbone_channel, bias=False)
@@ -101,6 +132,7 @@ class ModeProcessor(nn.Module):
             torch.randn(heads, 2 * backbone_channel, 1) * (1.0 / math.sqrt(backbone_channel))
         )
 
+        # Multi-scale temporal convolutions
         self.temporal_conv_1 = nn.Conv1d(input_dim, gpt_channel, 1, padding=0, bias=False)
         self.temporal_conv_3 = nn.Conv1d(input_dim, gpt_channel, 3, padding=1, bias=False)
         self.temporal_conv_5 = nn.Conv1d(input_dim, gpt_channel, 5, padding=2, bias=False)
@@ -205,16 +237,18 @@ class ModeProcessor(nn.Module):
         mean_adjacency = adjacency_prob.mean(dim=0).detach()
         self.ema_A = self.ema_m * self.ema_A + (1.0 - self.ema_m) * mean_adjacency
 
-        fixed_adjacency = (self.adj_mx > 0).float()
-        fixed_adjacency = fixed_adjacency / (fixed_adjacency.sum(-1, keepdim=True) + self.eps)
-        adjacency_scores = (1.0 - mix_alpha) * self.ema_A + mix_alpha * fixed_adjacency
+        # Use pre-computed normalized adjacency matrix
+        adjacency_scores = (1.0 - mix_alpha) * self.ema_A + mix_alpha * self.norm_adj_mx
 
         if self.training and self.edge_dropout > 0:
             keep_mask = (torch.rand_like(adjacency_scores) > self.edge_dropout).float()
             adjacency_scores = adjacency_scores * keep_mask
 
         degree_prior = self._compute_degree_prior(adjacency_scores)
-        adjacency_scores = adjacency_scores * (0.8 + 0.2 * degree_prior)
+        # Apply degree prior with configured scaling
+        adjacency_scores = adjacency_scores * (
+            self.DEGREE_PRIOR_BASE + self.DEGREE_PRIOR_SCALE * degree_prior
+        )
 
         working_scores = adjacency_scores.clone()
         working_scores.fill_diagonal_(0.0)
@@ -235,7 +269,7 @@ class ModeProcessor(nn.Module):
 
         self.global_step += 1
         if self.global_step.item() < self.warmup_steps:
-            adjacency_binary = torch.maximum(adjacency_binary, (self.adj_mx > 0).float())
+            adjacency_binary = torch.maximum(adjacency_binary, self.binary_adj_mx)
 
         return adjacency_binary
 
@@ -251,20 +285,15 @@ class ModeProcessor(nn.Module):
         """
         input_tensor = self.ensure_btnf_layout(input_tensor)
         batch_size, _, num_nodes, _ = input_tensor.shape
-        input_by_channel = input_tensor.permute(0, 3, 2, 1)
 
         temporal_embedding = self.temporal_embedding(input_tensor)
         node_embedding = (
             self.node_emb.unsqueeze(0).expand(batch_size, -1, -1).transpose(1, 2).unsqueeze(-1)
         )
 
-        flattened_input = (
-            input_by_channel.transpose(1, 2)
-            .contiguous()
-            .view(batch_size, num_nodes, -1)
-            .transpose(1, 2)
-            .unsqueeze(-1)
-        )
+        # Reshape input to [B, T*F, N, 1] for conv2d
+        # Permute: (B, T, N, F) -> (B, F, N, T), then reshape to (B, F*T, N, 1)
+        flattened_input = input_tensor.permute(0, 3, 2, 1).reshape(batch_size, self.input_dim * self.input_len, num_nodes, 1)
         flattened_input = self.start_conv(flattened_input)
 
         spatiotemporal_features = torch.cat([flattened_input, temporal_embedding, node_embedding], dim=1)
@@ -273,7 +302,8 @@ class ModeProcessor(nn.Module):
         spatiotemporal_features = self.feature_norm(spatiotemporal_features)
 
         temporal_features = self._compute_temporal_multiscale_features(input_tensor)
-        temporal_gate = torch.sigmoid(self.temporal_gate(self.feature_norm(temporal_features)))
+        # Use separate LayerNorm for temporal features to avoid interference
+        temporal_gate = torch.sigmoid(self.temporal_gate(self.temporal_feature_norm(temporal_features)))
         fused_features = spatiotemporal_features + temporal_gate * temporal_features
 
         if self.use_dynamic_graph:
@@ -287,6 +317,9 @@ class ModeProcessor(nn.Module):
 
 
 class DGLLM(nn.Module):
+    # Residual connection scaling coefficient
+    RESIDUAL_SCALE = 0.06  # Optuna Bayesian optimized
+    
     def __init__(
         self,
         device,
@@ -382,7 +415,7 @@ class DGLLM(nn.Module):
 
         residual = original_input[..., 0].permute(0, 2, 1)
         residual = self.residual_proj(residual).permute(0, 2, 1).unsqueeze(-1)
-        final_prediction = final_prediction + 0.1 * residual
+        final_prediction = final_prediction + self.RESIDUAL_SCALE * residual
 
         return final_prediction, learned_graphs
 

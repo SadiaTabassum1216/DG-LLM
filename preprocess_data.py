@@ -24,6 +24,7 @@ Raw data format expected:
 import numpy as np
 import os
 import argparse
+import h5py
 
 from utils import create_sliding_windows
 
@@ -131,7 +132,6 @@ def load_raw_traffic_data(data_path: str) -> np.ndarray:
         data = np.load(data_path)
         
     elif ext in ['.h5', '.hdf5']:
-        import h5py
         with h5py.File(data_path, 'r') as f:
             for key in ['data', 'raw', 'traffic', 'flow']:
                 if key in f:

@@ -1,4 +1,5 @@
 import os
+from contextlib import nullcontext
 
 import numpy as np
 import torch
@@ -116,7 +117,7 @@ class Trainer:
         ctx = (
             torch.amp.autocast("cuda", dtype=self.amp_dtype)
             if self.use_amp
-            else torch.cuda.amp.autocast(enabled=False)
+            else nullcontext()
         )
         with ctx:
             preds, _ = self.model(vmd_data, x_in)
@@ -154,7 +155,7 @@ class Trainer:
         ctx = (
             torch.amp.autocast("cuda", dtype=self.amp_dtype)
             if self.use_amp
-            else torch.cuda.amp.autocast(enabled=False)
+            else nullcontext()
         )
         with torch.no_grad(), ctx:
             preds, _ = self.model(vmd_data, x_in)

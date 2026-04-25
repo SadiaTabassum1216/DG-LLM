@@ -1,0 +1,154 @@
+import os
+import torch
+import optuna
+import argparse
+import numpy as np
+
+from data_loader import load_dataset
+from model import DGLLM
+from utils import seed_everything, load_pickle
+
+def create_model(trial, args, device, adj_mx):
+    # Sample secondary hyperparameters
+    hysteresis_ratio = trial.suggest_float("hysteresis_ratio", 0.5, 0.95)
+    gat_tau = trial.suggest_float("gat_tau", 0.1, 2.0)
+    head_dropout = trial.suggest_float("head_dropout", 0.0, 0.5)
+    edge_dropout = trial.suggest_float("edge_dropout", 0.0, 0.5)
+        
+    model = DGLLM(
+        device=device,
+        adj_mx=adj_mx,
+        input_dim=args.input_dim,
+        num_nodes=args.num_nodes,
+        input_len=args.input_len,
+        output_len=args.output_len,
+        llm_layer=args.llm_layer,
+        U=args.U,
+        vmd_K=args.vmd_k,
+        use_attention_fusion=True,
+    ).to(device)
+    
+    # Inject hyperparameters into each mode processor
+    for mode_proc in model.mode_models:
+        mode_proc.hysteresis_ratio = hysteresis_ratio
+        mode_proc.gat_tau = gat_tau
+        mode_proc.head_dropout = head_dropout
+        mode_proc.edge_dropout = edge_dropout
+    
+    return model
+
+def objective(trial, args, device, train_loader, val_loader, scaler, adj_mx):
+    print(f"\n--- Starting Trial {trial.number} ---")
+    model = create_model(trial, args, device, adj_mx)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    
+    max_train_batches = 5
+    max_val_batches = 2
+    
+    # Quick Training (1 epoch, subset of data)
+    model.train()
+    train_loss = 0.0
+    batches_processed = 0
+    
+    for batch_x, batch_y, batch_vmd in train_loader.get_iterator():
+        tx = batch_x.to(device, non_blocking=True).transpose(1, 3)
+        ty = batch_y.to(device, non_blocking=True).transpose(1, 3)[:, 0, :, :]
+        tvmd = batch_vmd.to(device, non_blocking=True)
+        
+        x_in = tx.permute(0, 3, 2, 1)
+        
+        optimizer.zero_grad()
+        prediction, _ = model(tvmd, x_in)
+        
+        # Scale back to calculate loss
+        pred_scaled = scaler.inverse_transform(prediction)
+        real_scaled = ty.permute(0, 2, 1).unsqueeze(-1)
+        loss = torch.nn.functional.l1_loss(pred_scaled, real_scaled)
+        
+        loss.backward()
+        optimizer.step()
+        
+        train_loss += loss.item()
+        batches_processed += 1
+        
+        if batches_processed >= max_train_batches:
+            break
+            
+    print(f"Trial {trial.number} - Train Loss: {train_loss / max(1, batches_processed):.4f}")
+    
+    # Quick Validation
+    model.eval()
+    val_loss = 0.0
+    val_batches = 0
+    
+    with torch.no_grad():
+        for batch_x, batch_y, batch_vmd in val_loader.get_iterator():
+            tx = batch_x.to(device, non_blocking=True).transpose(1, 3)
+            ty = batch_y.to(device, non_blocking=True).transpose(1, 3)[:, 0, :, :]
+            tvmd = batch_vmd.to(device, non_blocking=True)
+            
+            x_in = tx.permute(0, 3, 2, 1)
+            prediction, _ = model(tvmd, x_in)
+            
+            pred_scaled = scaler.inverse_transform(prediction)
+            real_scaled = ty.permute(0, 2, 1).unsqueeze(-1)
+            loss = torch.nn.functional.l1_loss(pred_scaled, real_scaled)
+            
+            val_loss += loss.item()
+            val_batches += 1
+            
+            if val_batches >= max_val_batches:
+                break
+                
+    avg_val_loss = val_loss / max(1, val_batches)
+    print(f"Trial {trial.number} - Val Loss: {avg_val_loss:.4f}")
+    
+    # Free memory
+    del model
+    torch.cuda.empty_cache()
+    
+    return avg_val_loss
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--data', type=str, default='taxi_drop')
+    parser.add_argument('--root_path', type=str, default='./Dataset')
+    parser.add_argument('--batch_size', type=int, default=8)
+    parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--trials', type=int, default=15)
+    args = parser.parse_args()
+    
+    seed_everything(args.seed)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
+    
+    args.data_path = os.path.join(args.root_path, args.data, 'processed')
+    args.num_nodes = 266
+    args.input_dim = 3
+    args.input_len = 12
+    args.output_len = 12
+    args.llm_layer = 6
+    args.U = 1
+    args.vmd_k = 3
+    
+    print("Loading dataset...")
+    data = load_dataset(args.data_path, args.batch_size, args)
+    train_loader = data['train_loader']
+    val_loader = data['val_loader']
+    scaler = data['scaler']
+    
+    adj_path = os.path.join(args.data_path, 'adj_mx.pkl')
+    adj_mx = load_pickle(adj_path)
+    
+    study = optuna.create_study(direction="minimize")
+    study.optimize(lambda trial: objective(trial, args, device, train_loader, val_loader, scaler, adj_mx), n_trials=args.trials)
+    
+    print("\n" + "="*50)
+    print("Bayesian Optimization Completed!")
+    print("="*50)
+    print("Best Trial:")
+    print(f"  Value: {study.best_trial.value:.4f}")
+    print("  Params:")
+    for key, value in study.best_trial.params.items():
+        print(f"    {key}: {value}")
+    print("="*50)

@@ -154,6 +154,9 @@ def _get_or_compute_vmd(split_name, split_input, args, input_cache_dir, output_c
         print(f"  [Local Cache Hit] Loading {split_name} from {target_path}...")
         return np.load(target_path)
 
+
+
+    # Cache missing: compute VMD and save to both local and external cache locations.
     print(f"  [Cache Miss] Computing VMD for {split_name} (K={args.vmd_k})...")
     vmd_result = precompute_vmd(split_input, vmd_k=args.vmd_k, max_workers=4)
     try:
