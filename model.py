@@ -16,23 +16,23 @@ class ModeProcessor(nn.Module):
     DEFAULT_GPT_CHANNEL = 256
     DEFAULT_BACKBONE_CHANNEL = 768  # 3 * gpt_channel
     
-    # Final Optimized Hyperparameters (from Consolidated Bayesian Run)
-    DEFAULT_HEAD_DROPOUT = 0.34
-    DEFAULT_LEAKY_SLOPE = 0.20
-    DEFAULT_GAT_TAU = 1.47
-    DEFAULT_EMA_M = 0.81
+    # Final Optimized Hyperparameters (from 50-Trial Final Check)
+    DEFAULT_HEAD_DROPOUT = 0.47
+    DEFAULT_LEAKY_SLOPE = 0.26
+    DEFAULT_GAT_TAU = 0.69
+    DEFAULT_EMA_M = 0.84
     DEFAULT_EPSILON = 1e-6
-    DEFAULT_EDGE_DROPOUT = 0.12
+    DEFAULT_EDGE_DROPOUT = 0.22
     DEFAULT_SYMMETRIZE = True
-    DEFAULT_HYSTERESIS_RATIO = 0.66
-    DEFAULT_WARMUP_STEPS = 732
-    DEFAULT_P_KEEP = 0.13
-    DEFAULT_MIX_HI = 0.77
-    DEFAULT_MIX_LO = 0.57
+    DEFAULT_HYSTERESIS_RATIO = 0.50
+    DEFAULT_WARMUP_STEPS = 263
+    DEFAULT_P_KEEP = 0.08
+    DEFAULT_MIX_HI = 0.86
+    DEFAULT_MIX_LO = 0.41
     
     # Node Importance (Degree Prior) parameters
-    DEGREE_PRIOR_BASE = 0.37  
-    DEGREE_PRIOR_SCALE = 0.42 
+    DEGREE_PRIOR_BASE = 0.19  
+    DEGREE_PRIOR_SCALE = 0.12 
 
     # --- Spatio-Temporal Hyperparameters ---
     # These control how nodes interact and how the graph structure evolves over time.
