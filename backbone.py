@@ -29,6 +29,27 @@ class SpatialAwareGPT2Attention(GPT2Attention):
     GPT-2 attention layer modified to respect the spatial layout of the traffic network.
     """
 
+    def _get_cached_causal_bias(
+        self,
+        query_len: int,
+        key_len: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """Return a cached causal additive bias with shape [1, 1, Tq, Tk]."""
+        cache_key = (query_len, key_len, device)
+        if not hasattr(self, "_cached_causal_bias") or self._cached_causal_bias_key != cache_key:
+            disallowed = torch.triu(
+                torch.ones(query_len, key_len, device=device, dtype=torch.bool),
+                diagonal=1,
+            )
+            bias = torch.zeros((query_len, key_len), device=device, dtype=dtype)
+            bias = bias.masked_fill(disallowed, float("-inf"))
+            self._cached_causal_bias = bias
+            self._cached_causal_bias_key = cache_key
+
+        return self._cached_causal_bias.to(device=device, dtype=dtype).view(1, 1, query_len, key_len)
+
     def _split_heads(self, tensor, num_heads, attn_head_size):
         new_shape = tensor.size()[:-1] + (num_heads, attn_head_size)
         tensor = tensor.view(*new_shape)
@@ -52,10 +73,7 @@ class SpatialAwareGPT2Attention(GPT2Attention):
         attn_bias: Optional[torch.Tensor] = None,
         **kwargs,
     ):
-        """
-        Run GPT-2 self-attention with bidirectional spatial awareness.
-        The causal mask is removed as we are processing nodes, not time steps.
-        """
+        """Run GPT-2 self-attention with causal masking and spatial bias."""
         del attention_mask, encoder_hidden_states, encoder_attention_mask, head_mask
         del output_attentions
 
@@ -78,7 +96,14 @@ class SpatialAwareGPT2Attention(GPT2Attention):
         batch_size = query.size(0)
         num_heads = query.size(1)
 
-        # Apply only the spatial/graph-based mask
+        causal_bias = self._get_cached_causal_bias(
+            query_len=query_len,
+            key_len=key_len,
+            device=hidden_states.device,
+            dtype=query.dtype,
+        )
+
+        # Combine causal and spatial/graph biases.
         if attn_bias is not None:
             if attn_bias.dim() != 4 or attn_bias.size(2) != query_len or attn_bias.size(3) != key_len:
                 raise ValueError(
@@ -88,9 +113,16 @@ class SpatialAwareGPT2Attention(GPT2Attention):
                 attn_bias = attn_bias.expand(batch_size, -1, -1, -1)
             if attn_bias.size(1) == 1 and num_heads > 1:
                 attn_bias = attn_bias.expand(-1, num_heads, -1, -1)
-            attention_bias = attn_bias.to(dtype=query.dtype)
+            attention_bias = causal_bias + attn_bias.to(dtype=query.dtype)
         else:
-            attention_bias = None
+            # log a warning if we're actually using the causal bias without spatial bias
+            if not hasattr(self, "_logged_causal_only"):
+                print(
+                    f"[SpatialAwareGPT2Attention] Using causal-only bias "
+                    f"(no spatial attn_bias). query_len={query_len}, key_len={key_len}"
+                )
+                self._logged_causal_only = True
+            attention_bias = causal_bias
 
         attn_output = F.scaled_dot_product_attention(
             query,
