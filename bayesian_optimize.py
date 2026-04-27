@@ -14,7 +14,6 @@ def create_model(trial, args, device, adj_mx):
     
     # 1. Graph Pruning & Stability
     p_keep = trial.suggest_float("p_keep", 0.02, 0.15)
-    hysteresis_ratio = trial.suggest_float("hysteresis_ratio", 0.3, 0.8)
     edge_dropout = trial.suggest_float("edge_dropout", 0.05, 0.3)
     
     # 2. Graph Attention Scoring
@@ -54,7 +53,6 @@ def create_model(trial, args, device, adj_mx):
     # Inject spatial and temporal hyperparameters into each mode processor
     for mode_proc in model.mode_processors:
         mode_proc.pruning_keep_ratio = p_keep
-        mode_proc.stability_hysteresis_ratio = hysteresis_ratio
         mode_proc.graph_edge_dropout = edge_dropout
         mode_proc.attention_head_dropout = head_dropout
         mode_proc.gat_leaky_slope = leaky_slope

@@ -101,7 +101,7 @@ def main():
     args = parse_args()
     
     print(f"{'='*60}")
-    print(f"  DG-LLM Training - {args.data}")
+    print(f"  Model Training - {args.data}")
     print(f"  Device: {args.device}")
     print(f"  Nodes: {args.num_nodes}")
     print(f"{'='*60}\n")
@@ -133,12 +133,6 @@ def main():
     print("\n>> Initializing Model...")
     trainer = Trainer(args, data['scaler'], adj_mx, args.device)
     print(f"   Total parameters: {trainer.model.param_num():,}")
-    
-    # training
-    # validation
-    # logging
-    # checkpoint saving
-    # best model saving
 
     # Check for existing checkpoint
     latest_ckpt = os.path.join(args.log_dir, 'latest_checkpoint.pth')
@@ -175,7 +169,7 @@ def main():
                 accumulation_step = batch_idx % trainer.grad_accum_steps
                 is_last_batch = batch_idx == num_train_batches - 1
                 
-                
+                # Training
                 loss, metrics = trainer.train(
                     tx,
                     ty,
@@ -187,9 +181,8 @@ def main():
                 epoch_metrics.append(metrics)
             
             avg_train_loss = np.mean(epoch_loss)
-            # avg_train_mae = np.mean([m[0] for m in epoch_metrics])
             
-            # Evaluate
+            # validate
             val_loss = []
             val_metrics = []
             
@@ -234,9 +227,7 @@ def main():
         print("\n>> Skipping training (--test_only mode)")
 
 
-
-
-    # Evaluate
+    #Test model
     # Check if model checkpoint exists
     best_model_path = os.path.join(args.log_dir, 'best_model.pth')
     latest_ckpt = os.path.join(args.log_dir, 'latest_checkpoint.pth')

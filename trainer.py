@@ -107,6 +107,7 @@ class Trainer:
         return checkpoint["epoch"], checkpoint["best_val_loss"]
 
     def train(self, x, y_real, vmd_data, accumulation_step=0, is_last_batch=False):
+        """Train the model for one epoch with optional gradient accumulation and mixed precision."""
         self.model.train()
 
         if accumulation_step == 0:
@@ -114,6 +115,7 @@ class Trainer:
 
         x_in = x
 
+        # Enable mixed precision if configured
         ctx = (
             torch.amp.autocast("cuda", dtype=self.amp_dtype)
             if self.use_amp
