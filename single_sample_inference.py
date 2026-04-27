@@ -20,6 +20,7 @@ import numpy as np
 import argparse
 import os
 import time
+import glob
 from types import SimpleNamespace
 
 from trainer import Trainer
@@ -62,6 +63,23 @@ def parse_args():
 
     if args.model_path is None:
         args.model_path = os.path.join(str(MODELS_DIR), args.data, "best_model.pth")
+
+    # Kaggle-specific auto-detection if default path fails
+    if not os.path.exists(args.model_path) and os.path.exists('/kaggle'):
+        print(f"  >> Checkpoint not found at {args.model_path}. Searching in /kaggle/input...")
+        # Pattern matching the user's structure: /kaggle/input/.../models/<data>/best_model.pth
+        search_pattern = f"/kaggle/input/**/models/{args.data}/best_model.pth"
+        found_paths = glob.glob(search_pattern, recursive=True)
+        if found_paths:
+            args.model_path = found_paths[0]
+            print(f"  >> Found checkpoint at: {args.model_path}")
+        else:
+            # Fallback: search for any best_model.pth inside a directory named after the dataset
+            search_pattern_alt = f"/kaggle/input/**/{args.data}/best_model.pth"
+            found_paths_alt = glob.glob(search_pattern_alt, recursive=True)
+            if found_paths_alt:
+                args.model_path = found_paths_alt[0]
+                print(f"  >> Found checkpoint at: {args.model_path}")
 
     return args
 
