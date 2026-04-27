@@ -16,23 +16,31 @@ class ModeProcessor(nn.Module):
     DEFAULT_GPT_CHANNEL = 256
     DEFAULT_BACKBONE_CHANNEL = 768  # 3 * gpt_channel
     
-    # Final Optimized Hyperparameters (from 50-Trial Final Check)
-    DEFAULT_HEAD_DROPOUT = 0.47
-    DEFAULT_LEAKY_SLOPE = 0.26
-    DEFAULT_GAT_TAU = 0.69
-    DEFAULT_EMA_M = 0.84
-    DEFAULT_EPSILON = 1e-6
-    DEFAULT_EDGE_DROPOUT = 0.22
-    DEFAULT_SYMMETRIZE = True
-    DEFAULT_HYSTERESIS_RATIO = 0.50
-    DEFAULT_WARMUP_STEPS = 263
-    DEFAULT_P_KEEP = 0.08
-    DEFAULT_MIX_HI = 0.86
-    DEFAULT_MIX_LO = 0.41
+    # --- Optimized Spatio-Temporal Hyperparameters ---
+    # These parameters were found via Bayesian optimization (50 trials).
     
-    # Node Importance (Degree Prior) parameters
-    DEGREE_PRIOR_BASE = 0.19  
-    DEGREE_PRIOR_SCALE = 0.12 
+    # 1. Graph Attention Scoring
+    ATTENTION_HEAD_DROPOUT = 0.3003196817750853  # Probability of dropping an entire attention head
+    GAT_LEAKY_SLOPE = 0.2735204092933256         # Slope for LeakyReLU in GAT scoring
+    GAT_TEMPERATURE = 0.18350835882220612        # Softmax temperature for graph attention scores
+    
+    # 2. Graph Evolution & Stability
+    GRAPH_EMA_MOMENTUM = 0.9470474370355585      # Momentum for exponential moving average of learned graph
+    GRAPH_EDGE_DROPOUT = 0.12128802310380433      # Probability of dropping individual edges during training
+    STABILITY_HYSTERESIS_RATIO = 0.4219167677394625 # Penalty threshold to prevent rapid edge toggling
+    
+    # 3. Graph Pruning & Blending
+    GRAPH_LEARNING_WARMUP = 912                  # Steps to transition from static road network to learned graph
+    GRAPH_PRUNING_KEEP_RATIO = 0.0363680665677074 # Top % of learned edges to retain (sparsity control)
+    INITIAL_STATIC_GRAPH_WEIGHT = 0.981835676241062 # Initial weighting of the physical road network
+    FINAL_STATIC_GRAPH_WEIGHT = 0.18778639265443198 # Final weighting of the physical road network after warmup
+    
+    # 4. Node Importance (Degree Prior)
+    NODE_DEGREE_BASE_PRIOR = 0.3536020789189776  # Base importance for all nodes regardless of connectivity
+    NODE_DEGREE_IMPORTANCE_SCALE = 0.38367583319267784 # Scaling factor for node connectivity importance
+    
+    DEFAULT_EPSILON = 1e-6
+    DEFAULT_SYMMETRIZE = True
 
     # --- Spatio-Temporal Hyperparameters ---
     # These control how nodes interact and how the graph structure evolves over time.
@@ -58,9 +66,9 @@ class ModeProcessor(nn.Module):
         gpt_channel=DEFAULT_GPT_CHANNEL,
         use_dynamic_graph=True,
         heads=4,
-        p_keep=DEFAULT_P_KEEP,
-        mix_hi=DEFAULT_MIX_HI,
-        mix_lo=DEFAULT_MIX_LO,
+        pruning_keep_ratio=GRAPH_PRUNING_KEEP_RATIO,
+        initial_static_weight=INITIAL_STATIC_GRAPH_WEIGHT,
+        final_static_weight=FINAL_STATIC_GRAPH_WEIGHT,
     ):
         """
         Initializes a mode-specific processor that combines spatial and temporal patterns.
@@ -73,9 +81,9 @@ class ModeProcessor(nn.Module):
         self.use_dynamic_graph = use_dynamic_graph
 
         self.heads = heads
-        self.p_keep = p_keep
-        self.mix_hi = mix_hi
-        self.mix_lo = mix_lo
+        self.pruning_keep_ratio = pruning_keep_ratio
+        self.initial_static_weight = initial_static_weight
+        self.final_static_weight = final_static_weight
         
         self.input_len = input_len
         self.gpt_channel = gpt_channel
@@ -94,15 +102,15 @@ class ModeProcessor(nn.Module):
         self.register_buffer("binary_adj_mx", binary_adj)
 
         # Graph attention hyperparameters
-        self.head_dropout = self.DEFAULT_HEAD_DROPOUT
-        self.leaky_slope = self.DEFAULT_LEAKY_SLOPE
-        self.gat_tau = self.DEFAULT_GAT_TAU
-        self.ema_m = self.DEFAULT_EMA_M
+        self.attention_head_dropout = self.ATTENTION_HEAD_DROPOUT
+        self.gat_leaky_slope = self.GAT_LEAKY_SLOPE
+        self.gat_temperature = self.GAT_TEMPERATURE
+        self.graph_ema_momentum = self.GRAPH_EMA_MOMENTUM
         self.eps = self.DEFAULT_EPSILON
-        self.edge_dropout = self.DEFAULT_EDGE_DROPOUT
+        self.graph_edge_dropout = self.GRAPH_EDGE_DROPOUT
         self.symmetrize = self.DEFAULT_SYMMETRIZE
-        self.hysteresis_ratio = self.DEFAULT_HYSTERESIS_RATIO
-        self.warmup_steps = self.DEFAULT_WARMUP_STEPS
+        self.stability_hysteresis_ratio = self.STABILITY_HYSTERESIS_RATIO
+        self.graph_learning_warmup = self.GRAPH_LEARNING_WARMUP
 
         self.feature_encoder = nn.Conv2d(input_dim * input_len, gpt_channel, kernel_size=(1, 1))
         self.temporal_embedding = TemporalEmbedding(self.time_steps, gpt_channel)
@@ -171,9 +179,9 @@ class ModeProcessor(nn.Module):
         during the initial training warmup.
         """
         step = float(self.global_step.item())
-        warmup = max(self.warmup_steps, 1)
+        warmup = max(self.graph_learning_warmup, 1)
         progress = min(step / warmup, 1.0)
-        return self.mix_hi + (self.mix_lo - self.mix_hi) * progress
+        return self.initial_static_weight + (self.final_static_weight - self.initial_static_weight) * progress
 
     def _calculate_node_importance(self, graph_scores: torch.Tensor) -> torch.Tensor:
         importance = graph_scores.sum(dim=-1, keepdim=True)
@@ -193,11 +201,11 @@ class ModeProcessor(nn.Module):
         pair_features = torch.cat([query_i, key_j], dim=-1)
 
         logits_all = torch.einsum("bijd,hd->bhij", pair_features, self.gat_a.squeeze(-1))
-        logits_all = F.leaky_relu(logits_all, self.leaky_slope)
+        logits_all = F.leaky_relu(logits_all, self.gat_leaky_slope)
 
-        if self.training and self.head_dropout > 0:
+        if self.training and self.attention_head_dropout > 0:
             num_heads = logits_all.size(1)
-            head_mask = (torch.rand(num_heads, device=logits_all.device) >= self.head_dropout).float()
+            head_mask = (torch.rand(num_heads, device=logits_all.device) >= self.attention_head_dropout).float()
             if head_mask.sum() == 0:
                 head_mask[0] = 1.0
             head_mask = head_mask.view(1, num_heads, 1, 1)
@@ -206,30 +214,30 @@ class ModeProcessor(nn.Module):
         else:
             logits = logits_all.mean(dim=1)
 
-        logits = logits / max(self.gat_tau, 1e-6)
+        logits = logits / max(self.gat_temperature, 1e-6)
         graph_prob = torch.softmax(logits, dim=-1)
 
         mean_graph = graph_prob.mean(dim=0).detach()
-        self.ema_A = self.ema_m * self.ema_A + (1.0 - self.ema_m) * mean_graph
+        self.ema_A = self.graph_ema_momentum * self.ema_A + (1.0 - self.graph_ema_momentum) * mean_graph
 
         # Mix current learned weights with the pre-computed static normalized adjacency
         graph_scores = (1.0 - mix_alpha) * self.ema_A + mix_alpha * self.norm_adj_mx
 
-        if self.training and self.edge_dropout > 0:
-            keep_mask = (torch.rand_like(graph_scores) > self.edge_dropout).float()
+        if self.training and self.graph_edge_dropout > 0:
+            keep_mask = (torch.rand_like(graph_scores) > self.graph_edge_dropout).float()
             graph_scores = graph_scores * keep_mask
 
         importance_weight = self._calculate_node_importance(graph_scores)
         # Apply connectivity-based weighting
         graph_scores = graph_scores * (
-            self.DEGREE_PRIOR_BASE + self.DEGREE_PRIOR_SCALE * importance_weight
+            self.NODE_DEGREE_BASE_PRIOR + self.NODE_DEGREE_IMPORTANCE_SCALE * importance_weight
         )
 
         working_scores = graph_scores.clone()
         working_scores.fill_diagonal_(0.0)
 
         # Retain only the strongest connections (top-K pruning)
-        keep_ratio = min(max(float(self.p_keep), 1e-3), 0.99)
+        keep_ratio = min(max(float(self.pruning_keep_ratio), 1e-3), 0.99)
         threshold = torch.quantile(working_scores, 1.0 - keep_ratio, dim=-1, keepdim=True)
         graph_binary = (working_scores >= threshold).float()
 
@@ -239,13 +247,13 @@ class ModeProcessor(nn.Module):
             graph_binary = torch.maximum(graph_binary, graph_binary.t())
 
         row_mean = working_scores.mean(dim=-1, keepdim=True)
-        low_confidence_mask = (working_scores < (row_mean * self.hysteresis_ratio)).float()
+        low_confidence_mask = (working_scores < (row_mean * self.stability_hysteresis_ratio)).float()
         keep_previous_edges = self.prev_A * (1.0 - low_confidence_mask)
         graph_binary = torch.clamp(graph_binary + keep_previous_edges, 0.0, 1.0)
         self.prev_A = graph_binary.detach()
 
         self.global_step += 1
-        if self.global_step.item() < self.warmup_steps:
+        if self.global_step.item() < self.graph_learning_warmup:
             graph_binary = torch.maximum(graph_binary, self.binary_adj_mx)
 
         return graph_binary
@@ -287,8 +295,8 @@ class ModeProcessor(nn.Module):
 
 
 class DGLLM(nn.Module):
-    # Final Optimized Residual Connection Scaling
-    RESIDUAL_SCALE = 0.13
+    # Final Optimized Global Flow Residual Scaling
+    GLOBAL_FLOW_RESIDUAL_SCALE = 0.08777097436221411
     
     def __init__(
         self,
@@ -388,7 +396,7 @@ class DGLLM(nn.Module):
         # Baseline Flow Residual Connection
         flow_residual = original_input[..., 0].permute(0, 2, 1)
         flow_residual = self.flow_residual_projection(flow_residual).permute(0, 2, 1).unsqueeze(-1)
-        final_prediction = final_prediction + self.RESIDUAL_SCALE * flow_residual
+        final_prediction = final_prediction + self.GLOBAL_FLOW_RESIDUAL_SCALE * flow_residual
 
         return final_prediction, learned_graphs
 

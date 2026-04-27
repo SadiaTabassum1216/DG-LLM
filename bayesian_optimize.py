@@ -48,22 +48,22 @@ def create_model(trial, args, device, adj_mx):
     ).to(device)
     
     # Apply Global Residual Scale
-    model.RESIDUAL_SCALE = residual_scale
+    model.GLOBAL_FLOW_RESIDUAL_SCALE = residual_scale
     
     # Inject spatial and temporal hyperparameters into each mode processor
     for mode_proc in model.mode_processors:
-        mode_proc.p_keep = p_keep
-        mode_proc.hysteresis_ratio = hysteresis_ratio
-        mode_proc.edge_dropout = edge_dropout
-        mode_proc.gat_tau = gat_tau
-        mode_proc.head_dropout = head_dropout
-        mode_proc.leaky_slope = leaky_slope
-        mode_proc.mix_hi = mix_hi
-        mode_proc.mix_lo = mix_lo
-        mode_proc.ema_m = ema_m
-        mode_proc.warmup_steps = warmup_steps
-        mode_proc.DEGREE_PRIOR_BASE = degree_prior_base
-        mode_proc.DEGREE_PRIOR_SCALE = degree_prior_scale
+        mode_proc.pruning_keep_ratio = p_keep
+        mode_proc.stability_hysteresis_ratio = hysteresis_ratio
+        mode_proc.graph_edge_dropout = edge_dropout
+        mode_proc.gat_temperature = gat_tau
+        mode_proc.attention_head_dropout = head_dropout
+        mode_proc.gat_leaky_slope = leaky_slope
+        mode_proc.initial_static_weight = mix_hi
+        mode_proc.final_static_weight = mix_lo
+        mode_proc.graph_ema_momentum = ema_m
+        mode_proc.graph_learning_warmup = warmup_steps
+        mode_proc.NODE_DEGREE_BASE_PRIOR = degree_prior_base
+        mode_proc.NODE_DEGREE_IMPORTANCE_SCALE = degree_prior_scale
     
     return model
 
