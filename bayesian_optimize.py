@@ -1,3 +1,4 @@
+import math
 import os
 import torch
 import optuna
@@ -47,23 +48,31 @@ def create_model(trial, args, device, adj_mx):
         use_attention_fusion=True,
     ).to(device)
     
-    # Apply Global Residual Scale
-    model.GLOBAL_FLOW_RESIDUAL_SCALE = residual_scale
+    # Apply Global Residual Scale (Injected into learnable parameter)
+    model.global_flow_residual_scale.data.fill_(residual_scale)
     
     # Inject spatial and temporal hyperparameters into each mode processor
     for mode_proc in model.mode_processors:
         mode_proc.pruning_keep_ratio = p_keep
         mode_proc.stability_hysteresis_ratio = hysteresis_ratio
         mode_proc.graph_edge_dropout = edge_dropout
-        mode_proc.gat_temperature = gat_tau
         mode_proc.attention_head_dropout = head_dropout
         mode_proc.gat_leaky_slope = leaky_slope
+        
+        # Inject into learnable GAT temperature (using inverse softplus)
+        mode_proc.gat_temp_raw.data.fill_(math.log(math.exp(gat_tau) - 1.0 + 1e-9))
         mode_proc.initial_static_weight = mix_hi
         mode_proc.final_static_weight = mix_lo
         mode_proc.graph_ema_momentum = ema_m
         mode_proc.graph_learning_warmup = warmup_steps
-        mode_proc.NODE_DEGREE_BASE_PRIOR = degree_prior_base
-        mode_proc.NODE_DEGREE_IMPORTANCE_SCALE = degree_prior_scale
+        
+        # Inject into learnable prior parameters
+        mode_proc.node_degree_base_prior.data.fill_(degree_prior_base)
+        mode_proc.node_degree_importance_scale.data.fill_(degree_prior_scale)
+        
+        # Inject into learnable blending logit (calculated from mix_lo)
+        initial_logit = math.log(mix_lo / (1.0 - mix_lo + 1e-6))
+        mode_proc.learnable_static_weight_logit.data.fill_(initial_logit)
     
     return model
 

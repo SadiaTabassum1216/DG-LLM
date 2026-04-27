@@ -12,32 +12,34 @@ class ModeProcessor(nn.Module):
     """
     
     # Configuration constants for channel dimensions
-    DEFAULT_TIME_STEPS = 288  # PEMS uses 5-minute intervals
+    DEFAULT_TIME_STEPS = 288        # PEMS uses 5-minute intervals
     DEFAULT_GPT_CHANNEL = 256
     DEFAULT_BACKBONE_CHANNEL = 768  # 3 * gpt_channel
     
     # --- Optimized Spatio-Temporal Hyperparameters ---
-    # These parameters were found via Bayesian optimization (50 trials).
+    # These parameters were found via Bayesian optimization.
     
     # 1. Graph Attention Scoring
-    ATTENTION_HEAD_DROPOUT = 0.3003196817750853  # Probability of dropping an entire attention head
-    GAT_LEAKY_SLOPE = 0.2735204092933256         # Slope for LeakyReLU in GAT scoring
-    GAT_TEMPERATURE = 0.18350835882220612        # Softmax temperature for graph attention scores
+    ATTENTION_HEAD_DROPOUT = 0.3        # Probability of dropping an entire attention head
+    GAT_LEAKY_SLOPE = 0.25              # Slope for LeakyReLU in GAT scoring
+    DEFAULT_GAT_TEMPERATURE = 0.5       # [LEARNABLE] Softmax temperature for graph attention scores
     
     # 2. Graph Evolution & Stability
-    GRAPH_EMA_MOMENTUM = 0.9470474370355585      # Momentum for exponential moving average of learned graph
-    GRAPH_EDGE_DROPOUT = 0.12128802310380433      # Probability of dropping individual edges during training
-    STABILITY_HYSTERESIS_RATIO = 0.4219167677394625 # Penalty threshold to prevent rapid edge toggling
+    GRAPH_EMA_MOMENTUM = 0.95           # Momentum for exponential moving average of learned graph
+    GRAPH_EDGE_DROPOUT = 0.1            # Probability of dropping individual edges during training
+    STABILITY_HYSTERESIS_RATIO = 0.5    # Penalty threshold to prevent rapid edge toggling
     
     # 3. Graph Pruning & Blending
-    GRAPH_LEARNING_WARMUP = 912                  # Steps to transition from static road network to learned graph
-    GRAPH_PRUNING_KEEP_RATIO = 0.0363680665677074 # Top % of learned edges to retain (sparsity control)
-    INITIAL_STATIC_GRAPH_WEIGHT = 0.981835676241062 # Initial weighting of the physical road network
-    FINAL_STATIC_GRAPH_WEIGHT = 0.18778639265443198 # Final weighting of the physical road network after warmup
+    GRAPH_LEARNING_WARMUP = 500         # Steps to transition from static road network to learned graph
+    GRAPH_PRUNING_KEEP_RATIO = 0.05     # Top % of learned edges to retain
     
-    # 4. Node Importance (Degree Prior)
-    NODE_DEGREE_BASE_PRIOR = 0.3536020789189776  # Base importance for all nodes regardless of connectivity
-    NODE_DEGREE_IMPORTANCE_SCALE = 0.38367583319267784 # Scaling factor for node connectivity importance
+    INITIAL_STATIC_GRAPH_WEIGHT = 0.8   # Initial weighting of the physical road network
+    FINAL_STATIC_GRAPH_WEIGHT = 0.2     # [LEARNABLE] Final weighting of the physical road network after warmup
+    
+    # 4. Node Importance (Degree Prior) Default Values
+    # These are used as initial values for the learnable parameters.
+    DEFAULT_NODE_DEGREE_BASE_PRIOR = 0.35         # [LEARNABLE] Base importance for all nodes regardless of connectivity
+    DEFAULT_NODE_DEGREE_IMPORTANCE_SCALE = 0.4    # [LEARNABLE] Scaling factor for node connectivity importance
     
     DEFAULT_EPSILON = 1e-6
     DEFAULT_SYMMETRIZE = True
@@ -104,13 +106,24 @@ class ModeProcessor(nn.Module):
         # Graph attention hyperparameters
         self.attention_head_dropout = self.ATTENTION_HEAD_DROPOUT
         self.gat_leaky_slope = self.GAT_LEAKY_SLOPE
-        self.gat_temperature = self.GAT_TEMPERATURE
         self.graph_ema_momentum = self.GRAPH_EMA_MOMENTUM
         self.eps = self.DEFAULT_EPSILON
         self.graph_edge_dropout = self.GRAPH_EDGE_DROPOUT
         self.symmetrize = self.DEFAULT_SYMMETRIZE
         self.stability_hysteresis_ratio = self.STABILITY_HYSTERESIS_RATIO
         self.graph_learning_warmup = self.GRAPH_LEARNING_WARMUP
+
+        # Learnable Graph Attention Parameters
+        self.gat_temp_raw = nn.Parameter(torch.tensor(self.DEFAULT_GAT_TEMPERATURE))
+
+        # Learnable Prior Scaling Factors
+        self.node_degree_base_prior = nn.Parameter(torch.tensor(self.DEFAULT_NODE_DEGREE_BASE_PRIOR))
+        self.node_degree_importance_scale = nn.Parameter(torch.tensor(self.DEFAULT_NODE_DEGREE_IMPORTANCE_SCALE))
+
+        # Learnable Static Graph Weight (Adaptive Gating post-warmup)
+        # We initialize the logit so that sigmoid(logit) equals FINAL_STATIC_GRAPH_WEIGHT
+        initial_logit = math.log(self.FINAL_STATIC_GRAPH_WEIGHT / (1.0 - self.FINAL_STATIC_GRAPH_WEIGHT + self.eps))
+        self.learnable_static_weight_logit = nn.Parameter(torch.tensor(initial_logit))
 
         self.feature_encoder = nn.Conv2d(input_dim * input_len, gpt_channel, kernel_size=(1, 1))
         self.temporal_embedding = TemporalEmbedding(self.time_steps, gpt_channel)
@@ -171,17 +184,24 @@ class ModeProcessor(nn.Module):
         temporal_features = self.temporal_projection(temporal_features)
         return temporal_features.view(batch_size, num_nodes, -1)
 
-    def _get_blending_ratio(self) -> float:
+    def _get_blending_ratio(self) -> torch.Tensor:
         """
         Calculates the current blending ratio between the fixed road network and the learned graph.
         
-        The ratio shifts from 'mix_hi' (mostly fixed) to 'mix_lo' (mostly learned) 
-        during the initial training warmup.
+        1. Warmup Phase (Curriculum): Linear transition from INITIAL_STATIC_GRAPH_WEIGHT 
+           to FINAL_STATIC_GRAPH_WEIGHT.
+        2. Post-Warmup (Adaptive Gating): Uses a learnable parameter to find the optimal ratio.
         """
         step = float(self.global_step.item())
         warmup = max(self.graph_learning_warmup, 1)
-        progress = min(step / warmup, 1.0)
-        return self.initial_static_weight + (self.final_static_weight - self.initial_static_weight) * progress
+        
+        if step < warmup:
+            # Phase 1: Fixed Curriculum Warmup
+            progress = step / warmup
+            return self.initial_static_weight + (self.final_static_weight - self.initial_static_weight) * progress
+        else:
+            # Phase 2: Learnable Adaptive Gating
+            return torch.sigmoid(self.learnable_static_weight_logit)
 
     def _calculate_node_importance(self, graph_scores: torch.Tensor) -> torch.Tensor:
         importance = graph_scores.sum(dim=-1, keepdim=True)
@@ -190,7 +210,7 @@ class ModeProcessor(nn.Module):
 
     def _generate_adaptive_graph(self, features: torch.Tensor) -> torch.Tensor:
         _, num_nodes, _ = features.shape
-        mix_alpha = self._get_blending_ratio()
+        mix_alpha = self._get_blending_ratio()  # This can now be a tensor or a float
 
         normalized_features = F.normalize(features, dim=-1)
         query = self.gat_q(normalized_features)
@@ -214,7 +234,9 @@ class ModeProcessor(nn.Module):
         else:
             logits = logits_all.mean(dim=1)
 
-        logits = logits / max(self.gat_temperature, 1e-6)
+        # Apply Learnable Temperature (Softplus ensures positive temperature)
+        gat_temperature = F.softplus(self.gat_temp_raw) + self.eps
+        logits = logits / gat_temperature
         graph_prob = torch.softmax(logits, dim=-1)
 
         mean_graph = graph_prob.mean(dim=0).detach()
@@ -228,9 +250,9 @@ class ModeProcessor(nn.Module):
             graph_scores = graph_scores * keep_mask
 
         importance_weight = self._calculate_node_importance(graph_scores)
-        # Apply connectivity-based weighting
+        # Apply connectivity-based weighting (Learnable Priors)
         graph_scores = graph_scores * (
-            self.NODE_DEGREE_BASE_PRIOR + self.NODE_DEGREE_IMPORTANCE_SCALE * importance_weight
+            self.node_degree_base_prior + self.node_degree_importance_scale * importance_weight
         )
 
         working_scores = graph_scores.clone()
@@ -295,8 +317,8 @@ class ModeProcessor(nn.Module):
 
 
 class DGLLM(nn.Module):
-    # Final Optimized Global Flow Residual Scaling
-    GLOBAL_FLOW_RESIDUAL_SCALE = 0.08777097436221411
+    # Final Optimized Global Flow Residual Scaling Default Value
+    DEFAULT_GLOBAL_FLOW_RESIDUAL_SCALE = 0.1    # [LEARNABLE]
     
     def __init__(
         self,
@@ -328,6 +350,9 @@ class DGLLM(nn.Module):
         """
         super().__init__()
         self.use_attention_fusion = use_attention_fusion
+
+        # Learnable Global Scaling Factor
+        self.global_flow_residual_scale = nn.Parameter(torch.tensor(self.DEFAULT_GLOBAL_FLOW_RESIDUAL_SCALE))
 
         self.mode_processors = nn.ModuleList(
             [
@@ -393,10 +418,10 @@ class DGLLM(nn.Module):
                 for mode_index in range(vmd_K)
             )
 
-        # Baseline Flow Residual Connection
+        # Baseline Flow Residual Connection (Learnable Scaling)
         flow_residual = original_input[..., 0].permute(0, 2, 1)
         flow_residual = self.flow_residual_projection(flow_residual).permute(0, 2, 1).unsqueeze(-1)
-        final_prediction = final_prediction + self.GLOBAL_FLOW_RESIDUAL_SCALE * flow_residual
+        final_prediction = final_prediction + self.global_flow_residual_scale * flow_residual
 
         return final_prediction, learned_graphs
 
