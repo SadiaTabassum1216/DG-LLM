@@ -123,8 +123,10 @@ def load_model_weights(trainer, model_path, device):
     missing, unexpected = trainer.model.load_state_dict(state, strict=False)
     if missing:
         print(f"  [Warning] Missing keys: {len(missing)}")
+        print(f"    Examples: {missing[:5]}")
     if unexpected:
         print(f"  [Warning] Unexpected keys: {len(unexpected)}")
+        print(f"    Examples: {unexpected[:5]}")
 
 
 def main():
