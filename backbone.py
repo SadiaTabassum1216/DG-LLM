@@ -14,48 +14,44 @@ def _create_spatial_attention_mask(
     device: torch.device,
     dtype: torch.dtype,
 ) -> torch.Tensor:
+    # Converts connectivity matrix to additive attention mask with -inf for disconnected nodes.
     """
-    Converts a binary road-network matrix into an additive mask for the attention mechanism.
-    Connected nodes get a 0 bias, while disconnected nodes get -inf to block influence.
+    Converts a road-network connectivity matrix into an additive attention mask.
+    - Connected nodes: 0 bias
+    - Disconnected nodes: -inf bias
     """
     seq_len = connectivity_matrix.size(0)
     mask = torch.zeros((seq_len, seq_len), device=device, dtype=dtype)
-    mask = mask.masked_fill(~connectivity_matrix.to(torch.bool), float("-inf"))
+    mask = mask.masked_fill(~connectivity_matrix.bool(), float("-inf"))
     return mask.view(1, 1, seq_len, seq_len)
 
 
 class SpatialAwareGPT2Attention(GPT2Attention):
-    """
-    GPT-2 attention layer modified to respect the spatial layout of the traffic network.
-    """
+    """GPT-2 attention layer modified to support spatial layout biases."""
 
     def _get_cached_causal_bias(
-        self,
-        query_len: int,
-        key_len: int,
-        device: torch.device,
-        dtype: torch.dtype,
+        self, query_len: int, key_len: int, device: torch.device, dtype: torch.dtype
     ) -> torch.Tensor:
-        """Return a cached causal additive bias with shape [1, 1, Tq, Tk]."""
+        # Generates and caches the standard causal mask for autoregressive attention.
+        """Returns a cached causal additive bias [1, 1, Tq, Tk]."""
         cache_key = (query_len, key_len, device)
         if not hasattr(self, "_cached_causal_bias") or self._cached_causal_bias_key != cache_key:
             disallowed = torch.triu(
-                torch.ones(query_len, key_len, device=device, dtype=torch.bool),
-                diagonal=1,
+                torch.ones(query_len, key_len, device=device, dtype=torch.bool), diagonal=1
             )
             bias = torch.zeros((query_len, key_len), device=device, dtype=dtype)
-            bias = bias.masked_fill(disallowed, float("-inf"))
-            self._cached_causal_bias = bias
+            self._cached_causal_bias = bias.masked_fill(disallowed, float("-inf"))
             self._cached_causal_bias_key = cache_key
 
-        return self._cached_causal_bias.to(device=device, dtype=dtype).view(1, 1, query_len, key_len)
+        return self._cached_causal_bias.to(dtype=dtype).view(1, 1, query_len, key_len)
 
     def _split_heads(self, tensor, num_heads, attn_head_size):
+        # Reshapes tensor to split embedding dimension into multiple attention heads.
         new_shape = tensor.size()[:-1] + (num_heads, attn_head_size)
-        tensor = tensor.view(*new_shape)
-        return tensor.permute(0, 2, 1, 3)
+        return tensor.view(*new_shape).permute(0, 2, 1, 3)
 
     def _merge_heads(self, tensor, num_heads, attn_head_size):
+        # Combines multiple attention heads back into a single hidden dimension.
         tensor = tensor.permute(0, 2, 1, 3).contiguous()
         new_shape = tensor.size()[:-2] + (num_heads * attn_head_size,)
         return tensor.view(*new_shape)
@@ -73,9 +69,10 @@ class SpatialAwareGPT2Attention(GPT2Attention):
         attn_bias: Optional[torch.Tensor] = None,
         **kwargs,
     ):
-        """Run GPT-2 self-attention with causal masking and spatial bias."""
-        del attention_mask, encoder_hidden_states, encoder_attention_mask, head_mask
-        del output_attentions
+        # Computes attention scores using both causal and optional spatial masks.
+        """Self-attention with optional spatial/graph bias."""
+        # Unused GPT-2 arguments
+        del attention_mask, encoder_hidden_states, encoder_attention_mask, head_mask, output_attentions
 
         if layer_past is None and "past_key_value" in kwargs:
             layer_past = kwargs["past_key_value"]
@@ -91,43 +88,32 @@ class SpatialAwareGPT2Attention(GPT2Attention):
             value = torch.cat([past_value, value], dim=-2)
 
         present = (key, value) if use_cache else None
-        query_len = query.size(-2)
+        batch_size, num_heads, query_len, _ = query.size()
         key_len = key.size(-2)
-        batch_size = query.size(0)
-        num_heads = query.size(1)
 
-        causal_bias = self._get_cached_causal_bias(
-            query_len=query_len,
-            key_len=key_len,
-            device=hidden_states.device,
-            dtype=query.dtype,
+        # 1. Start with Causal Bias
+        attention_bias = self._get_cached_causal_bias(
+            query_len=query_len, key_len=key_len, device=hidden_states.device, dtype=query.dtype
         )
 
-        # Combine causal and spatial/graph biases.
+        # 2. Integrate Spatial/Graph Bias
         if attn_bias is not None:
             if attn_bias.dim() != 4 or attn_bias.size(2) != query_len or attn_bias.size(3) != key_len:
-                raise ValueError(
-                    f"attn_bias must be [B|1, H|1, Tq, Tk]; got {tuple(attn_bias.size())}"
-                )
+                raise ValueError(f"attn_bias shape mismatch: expected [B|1, H|1, {query_len}, {key_len}], got {list(attn_bias.size())}")
+            
             if attn_bias.size(0) == 1 and batch_size > 1:
                 attn_bias = attn_bias.expand(batch_size, -1, -1, -1)
             if attn_bias.size(1) == 1 and num_heads > 1:
                 attn_bias = attn_bias.expand(-1, num_heads, -1, -1)
-            attention_bias = causal_bias + attn_bias.to(dtype=query.dtype)
-        else:
-            # log a warning if we're actually using the causal bias without spatial bias
-            if not hasattr(self, "_logged_causal_only"):
-                print(
-                    f"[SpatialAwareGPT2Attention] Using causal-only bias "
-                    f"(no spatial attn_bias). query_len={query_len}, key_len={key_len}"
-                )
-                self._logged_causal_only = True
-            attention_bias = causal_bias
+            
+            attention_bias = attention_bias + attn_bias.to(dtype=query.dtype)
+        elif not hasattr(self, "_logged_causal_only"):
+            print(f"[SpatialAwareGPT2Attention] Causal-only mode (no spatial bias). T={query_len}")
+            self._logged_causal_only = True
 
+        # 3. Scaled Dot Product Attention
         attn_output = F.scaled_dot_product_attention(
-            query,
-            key,
-            value,
+            query, key, value,
             attn_mask=attention_bias,
             dropout_p=self.attn_dropout.p if self.training else 0.0,
             is_causal=False,
@@ -136,17 +122,16 @@ class SpatialAwareGPT2Attention(GPT2Attention):
         attn_output = self._merge_heads(attn_output, self.num_heads, self.head_dim)
         attn_output = self.c_proj(attn_output)
         attn_output = self.resid_dropout(attn_output)
+
         return attn_output, present
 
 
 class SpatialAwareGPT2Block(GPT2Block):
-    """
-    A transformer block that passes spatial connectivity info into its attention layer.
-    """
+    """GPT-2 block that passes spatial connectivity info to its attention layer."""
 
     def forward(
         self,
-        hidden_states: torch.FloatTensor,
+        hidden_states: torch.Tensor,
         layer_past: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         attention_mask: Optional[torch.Tensor] = None,
         head_mask: Optional[torch.Tensor] = None,
@@ -157,12 +142,12 @@ class SpatialAwareGPT2Block(GPT2Block):
         attn_bias: Optional[torch.Tensor] = None,
         **kwargs,
     ):
-        # Run one transformer block and pass graph bias into attention.
-        """Run one GPT-2 block and forward graph attention bias to attention."""
+        # Executes one transformer block pass including layer norm, attention, and MLP.
+        """Run one GPT-2 block with spatial attention bias."""
         residual = hidden_states
         hidden_states = self.ln_1(hidden_states)
 
-        attn_output, present = self.attn(
+        attn_outputs = self.attn(
             hidden_states,
             layer_past=layer_past,
             attention_mask=attention_mask,
@@ -174,18 +159,18 @@ class SpatialAwareGPT2Block(GPT2Block):
             attn_bias=attn_bias,
             **kwargs,
         )
+        attn_output, present = attn_outputs
         hidden_states = residual + attn_output
 
         residual = hidden_states
         hidden_states = self.ln_2(hidden_states)
         hidden_states = residual + self.mlp(hidden_states)
 
-        if use_cache:
-            return hidden_states, present
-        return (hidden_states,)
+        return (hidden_states, present) if use_cache else (hidden_states,)
 
 
 def _inject_spatial_awareness(gpt2_model: GPT2Model) -> None:
+    # Runtime patching to replace standard GPT2 layers with spatial-aware versions.
     """
     Swaps standard GPT-2 layers with spatial-aware versions while preserving weights.
     """
@@ -195,9 +180,7 @@ def _inject_spatial_awareness(gpt2_model: GPT2Model) -> None:
 
 
 class SpatialGPTBackbone(nn.Module):
-    """
-    The core transformer backbone, adapted with spatial awareness for traffic forecasting.
-    """
+    # Transformer backbone with spatial awareness for traffic forecasting.
 
     def __init__(
         self,
@@ -207,31 +190,32 @@ class SpatialGPTBackbone(nn.Module):
         dropout_rate: float = 0.0,
         use_gradient_checkpointing: bool = True,
     ):
-        # Build the graph-aware GPT-2 backbone and configure trainable layers.
-        """Initialize GPT-2 backbone with LoRA and optional graph-biased attention.
-
+        # Initializes the backbone by loading GPT2, injecting spatial layers, and applying LoRA.
+        """
+        Initialize GPT-2 backbone with LoRA and optional graph-biased attention.
+        
         Args:
-            device: Kept for API compatibility with existing call sites.
-            gpt_layers: Number of GPT-2 blocks retained from the base model.
-            U: Number of top layers that receive graph bias and remain trainable.
-            dropout_rate: Output and LoRA dropout probability.
-            use_gradient_checkpointing: Whether to checkpoint block forwards.
+            device: Kept for API compatibility.
+            gpt_layers: Number of GPT-2 blocks to retain.
+            U: Number of top layers receiving graph bias and remaining trainable.
+            dropout_rate: Dropout probability.
+            use_gradient_checkpointing: Enable memory-efficient gradients.
         """
         super().__init__()
-
-        del device
         self.num_backbone_layers = gpt_layers
         self.unfrozen_top_layers = U
         self.dropout_rate = dropout_rate
         self.use_gradient_checkpointing = use_gradient_checkpointing
         self.lora_rank = 16
-        self.dropout = nn.Dropout(p=dropout_rate)
 
         self.gpt2 = self._init_base_model()
         self._freeze_lower_layers()
+        self.dropout = nn.Dropout(p=dropout_rate)
+
+
 
     def _init_base_model(self):
-        """Loads GPT-2 and wraps it with spatial-aware layers and LoRA adapters."""
+        # Loads pre-trained GPT2 and applies spatial awareness and PEFT/LoRA adapters.
         gpt2 = GPT2Model.from_pretrained(
             "gpt2",
             attn_implementation="eager",
@@ -252,15 +236,18 @@ class SpatialGPTBackbone(nn.Module):
         return get_peft_model(gpt2, lora_config)
 
     def _freeze_lower_layers(self) -> None:
-        """Freezes early layers to preserve pre-trained knowledge, keeping only top layers trainable."""
-        total_layers = len(self.gpt2.base_model.model.h)
-        top_layer_start = total_layers - self.unfrozen_top_layers
+        # Selectively freezes parameters to protect pre-trained weights while allowing top-layer tuning.
+        """Freezes lower layers and configures top-layer partial training."""
+        blocks = self.gpt2.base_model.model.h
+        top_layer_start = len(blocks) - self.unfrozen_top_layers
 
-        for layer_index, layer in enumerate(self.gpt2.base_model.model.h):
+        for i, layer in enumerate(blocks):
             for name, param in layer.named_parameters():
-                if layer_index < top_layer_start:
+                if i < top_layer_start:
+                    # Freeze base weights except normalization and positional embeddings
                     param.requires_grad = "ln" in name or "wpe" in name
                 else:
+                    # Keep top layers trainable (excluding MLPs to favor attention tuning)
                     param.requires_grad = "mlp" not in name
 
     def _resolve_runtime_flags(
@@ -270,13 +257,10 @@ class SpatialGPTBackbone(nn.Module):
         output_hidden_states: Optional[bool],
         return_dict: Optional[bool],
     ):
-        # Resolve runtime flags against model defaults.
-        """Resolve runtime flags against GPT-2 config defaults."""
+        # Determines execution flags based on provided inputs or model defaults.
         return (
             use_cache if use_cache is not None else gpt2_model.config.use_cache,
-            output_hidden_states
-            if output_hidden_states is not None
-            else gpt2_model.config.output_hidden_states,
+            output_hidden_states if output_hidden_states is not None else gpt2_model.config.output_hidden_states,
             return_dict if return_dict is not None else gpt2_model.config.use_return_dict,
         )
 
@@ -288,23 +272,20 @@ class SpatialGPTBackbone(nn.Module):
         past_key_values: Optional[Tuple[Tuple[torch.Tensor]]],
         position_ids: Optional[torch.LongTensor],
     ):
-        # Build embeddings and position ids for the GPT-2 stack.
-        """Validate and assemble GPT-2 hidden-state inputs.
-
-        Returns:
-            Tuple of ``(hidden_states, device, past_key_values)``.
-        """
+        # Prepares final hidden states by combining token/input embeddings with positional embeddings.
+        """Resolves inputs into hidden states and position IDs."""
         if input_ids is not None and inputs_embeds is not None:
             raise ValueError("Specify either input_ids or inputs_embeds, not both.")
-        if input_ids is None and inputs_embeds is None:
-            raise ValueError("You must specify input_ids or inputs_embeds.")
-
+        
         if input_ids is not None:
             input_shape = input_ids.size()
             device = input_ids.device
-        else:
+            inputs_embeds = gpt2_model.wte(input_ids)
+        elif inputs_embeds is not None:
             input_shape = inputs_embeds.size()[:-1]
             device = inputs_embeds.device
+        else:
+            raise ValueError("You must specify input_ids or inputs_embeds.")
 
         if past_key_values is None:
             past_length = 0
@@ -314,14 +295,8 @@ class SpatialGPTBackbone(nn.Module):
 
         if position_ids is None:
             position_ids = torch.arange(
-                past_length,
-                input_shape[-1] + past_length,
-                dtype=torch.long,
-                device=device,
+                past_length, input_shape[-1] + past_length, dtype=torch.long, device=device
             ).unsqueeze(0)
-
-        if inputs_embeds is None:
-            inputs_embeds = gpt2_model.wte(input_ids)
 
         hidden_states = inputs_embeds + gpt2_model.wpe(position_ids)
         return hidden_states, device, past_key_values
@@ -333,160 +308,114 @@ class SpatialGPTBackbone(nn.Module):
         device: torch.device,
         dtype: torch.dtype,
     ) -> Optional[torch.Tensor]:
-        """Prepares the spatial mask if connectivity information is available."""
+        # Validates dimensions and generates the spatial attention mask for the current sequence.
+        """Validates and creates the spatial attention mask."""
         if connectivity_matrix is None:
             return None
 
-        if (
-            connectivity_matrix.dim() != 2
-            or connectivity_matrix.size(0) != sequence_length
-            or connectivity_matrix.size(1) != sequence_length
-        ):
+        if connectivity_matrix.dim() != 2 or connectivity_matrix.size(0) != sequence_length:
             raise ValueError(
-                f"connectivity_matrix must be [T, T] matching sequence length {sequence_length}"
+                f"connectivity_matrix must be [T, T] matching sequence length {sequence_length}. "
+                f"Got {list(connectivity_matrix.size())}"
             )
 
         return _create_spatial_attention_mask(
-            connectivity_matrix=connectivity_matrix.to(device),
-            device=device,
-            dtype=dtype,
+            connectivity_matrix=connectivity_matrix.to(device), device=device, dtype=dtype
         )
 
-    def _build_checkpointed_block_forward(
+    def _block_forward_with_checkpoint(
         self,
         block: GPT2Block,
+        hidden_states: torch.Tensor,
         layer_head_mask: Optional[torch.Tensor],
         layer_attention_bias: Optional[torch.Tensor],
     ):
-        # Wrap one block so checkpointing can recompute its forward pass.
-        """Create a closure used by torch checkpoint for one block forward pass."""
-        def checkpointed_forward(hidden_states_input):
-            # Execute the block without cache so checkpointing stays compatible.
-            """Checkpoint-compatible wrapper returning only hidden states."""
-            outputs = block(
-                hidden_states_input,
+        # Wraps a block execution in a checkpointing function to save memory during training.
+        """Executes a block forward pass using gradient checkpointing."""
+        def checkpointed_fn(h):
+            return block(
+                h,
                 layer_past=None,
                 attention_mask=None,
                 head_mask=layer_head_mask,
                 use_cache=False,
                 output_attentions=False,
                 attn_bias=layer_attention_bias,
-            )
-            return outputs[0]
+            )[0]
 
-        return checkpointed_forward
+        return checkpoint(checkpointed_fn, hidden_states, use_reentrant=False)
 
     def _process_sequence(
         self,
         input_ids: Optional[torch.LongTensor] = None,
         past_key_values: Optional[Tuple[Tuple[torch.Tensor]]] = None,
-        attention_mask: Optional[torch.FloatTensor] = None,
-        token_type_ids: Optional[torch.LongTensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         head_mask: Optional[torch.FloatTensor] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
-        encoder_hidden_states: Optional[torch.Tensor] = None,
-        encoder_attention_mask: Optional[torch.FloatTensor] = None,
         use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         connectivity_matrix: Optional[torch.FloatTensor] = None,
+        **kwargs,
     ) -> Union[Tuple, dict]:
-        """Processes the input sequence through the spatial-aware transformer layers."""
-        # DG-LLM uses GPT-2 only as an embedding-driven decoder with graph bias.
-        # The extra GPT-2 arguments stay here for compatibility with standard GPT-2 calls.
-        del attention_mask, token_type_ids, encoder_hidden_states, encoder_attention_mask
-
+        # Orchestrates the full forward pass through all transformer layers with spatial biasing.
+        """Processes the input sequence through spatial-aware transformer layers."""
         gpt2_model = self.gpt2.base_model.model
         use_cache, output_hidden_states, return_dict = self._resolve_runtime_flags(
-            gpt2_model,
-            use_cache,
-            output_hidden_states,
-            return_dict,
+            gpt2_model, use_cache, output_hidden_states, return_dict
         )
-        del output_attentions
 
         hidden_states, device, past_key_values = self._prepare_inputs(
-            gpt2_model,
-            input_ids,
-            inputs_embeds,
-            past_key_values,
-            position_ids,
+            gpt2_model, input_ids, inputs_embeds, past_key_values, position_ids
+        )
+
+        spatial_mask = self._build_spatial_mask(
+            connectivity_matrix, hidden_states.size(1), device, hidden_states.dtype
         )
 
         all_hidden_states = () if output_hidden_states else None
         presents = () if use_cache else None
+        top_layer_start = len(gpt2_model.h) - self.unfrozen_top_layers
 
-        spatial_mask = self._build_spatial_mask(
-            connectivity_matrix=connectivity_matrix,
-            sequence_length=hidden_states.size(1),
-            device=device,
-            dtype=hidden_states.dtype,
-        )
-
-        total_layers = len(gpt2_model.h)
-        top_layer_start = total_layers - self.unfrozen_top_layers
-
-        for layer_index, (block, layer_past) in enumerate(zip(gpt2_model.h, past_key_values)):
-            # Only the top unfrozen layers consume the graph bias. Lower layers remain
-            # plain GPT-2 blocks so local language-model structure is preserved.
-            layer_attention_bias = (
-                spatial_mask
-                if layer_index >= top_layer_start and spatial_mask is not None
-                else None
-            )
-            layer_head_mask = head_mask[layer_index] if head_mask is not None else None
-
+        for i, (block, layer_past) in enumerate(zip(gpt2_model.h, past_key_values)):
             if output_hidden_states:
-                all_hidden_states = all_hidden_states + (hidden_states,)
+                all_hidden_states += (hidden_states,)
+
+            # Apply spatial bias only to the top unfrozen layers
+            layer_attn_bias = spatial_mask if i >= top_layer_start else None
+            layer_head_mask = head_mask[i] if head_mask is not None else None
 
             if self.training and self.use_gradient_checkpointing and not use_cache:
-                hidden_states = checkpoint(
-                    self._build_checkpointed_block_forward(
-                        block=block,
-                        layer_head_mask=layer_head_mask,
-                        layer_attention_bias=layer_attention_bias,
-                    ),
-                    hidden_states,
-                    use_reentrant=False,
+                hidden_states = self._block_forward_with_checkpoint(
+                    block, hidden_states, layer_head_mask, layer_attn_bias
                 )
-                continue
-
-            outputs = block(
-                hidden_states,
-                layer_past=layer_past,
-                attention_mask=None,
-                head_mask=layer_head_mask,
-                use_cache=use_cache,
-                output_attentions=False,
-                attn_bias=layer_attention_bias,
-            )
-            hidden_states = outputs[0]
-
-            if use_cache:
-                presents = presents + (outputs[1],)
+            else:
+                outputs = block(
+                    hidden_states,
+                    layer_past=layer_past,
+                    head_mask=layer_head_mask,
+                    use_cache=use_cache,
+                    attn_bias=layer_attn_bias,
+                )
+                hidden_states = outputs[0]
+                if use_cache:
+                    presents += (outputs[1],)
 
         hidden_states = gpt2_model.ln_f(hidden_states)
-
         if output_hidden_states:
-            all_hidden_states = all_hidden_states + (hidden_states,)
+            all_hidden_states += (hidden_states,)
 
         if not return_dict:
-            return tuple(
-                value
-                for value in [hidden_states, presents, all_hidden_states]
-                if value is not None
-            )
+            return tuple(v for v in [hidden_states, presents, all_hidden_states] if v is not None)
 
         return BaseModelOutputWithPastAndCrossAttentions(
             last_hidden_state=hidden_states,
             past_key_values=presents,
             hidden_states=all_hidden_states,
-            attentions=None,
         )
 
     def forward(self, input_embeddings: torch.Tensor, connectivity_matrix: torch.Tensor):
+        # Entry point for processing embeddings through the complete spatial transformer stack.
         """Processes input embeddings using the spatial-aware transformer backbone."""
         outputs = self._process_sequence(
             inputs_embeds=input_embeddings,

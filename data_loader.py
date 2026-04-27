@@ -143,9 +143,8 @@ def _normalize_traffic_flow(data):
 
 # Retrieves pre-processed VMD modes from the cache or calculates them on the fly.
 def _load_or_extract_vmd_modes(split_name, split_input, args, input_cache_dir, output_cache_dir, force_recompute=False):
-    context_len = getattr(args, "vmd_context", 100)
-    config_id = f"{args.data}_T{args.input_len}_K{args.vmd_k}_C{context_len}"
-    filename = f"vmd_causal_{split_name}_{config_id}.npy"
+    config_id = f"{args.data}_T{args.input_len}_K{args.vmd_k}"
+    filename = f"vmd_{split_name}_{config_id}.npy"
 
     target_path = os.path.join(output_cache_dir, filename)
     input_path = os.path.join(input_cache_dir, filename)
@@ -160,17 +159,9 @@ def _load_or_extract_vmd_modes(split_name, split_input, args, input_cache_dir, o
 
 
 
-    # Cache missing: compute Causal VMD.
-    print(f"  [Cache Miss] Computing Causal VMD for {split_name} (K={args.vmd_k}, Context={context_len})...")
-    
-    # Reconstruct raw continuous signal from windowed input for context
-    # split_input is [Samples, T, Nodes, Features]
-    S, T, N, F = split_input.shape
-    raw_reconstructed = np.zeros((S + T - 1, N, F), dtype=np.float32)
-    raw_reconstructed[:S] = split_input[:, 0]
-    raw_reconstructed[S:] = split_input[-1, 1:]
-    
-    vmd_result = precompute_vmd(raw_reconstructed, vmd_k=args.vmd_k, input_len=T, context_len=context_len, max_workers=4)
+    # Cache missing: compute VMD.
+    print(f"  [Cache Miss] Computing VMD for {split_name} (K={args.vmd_k})...")
+    vmd_result = precompute_vmd(split_input, vmd_k=args.vmd_k, max_workers=4)
     
     try:
         np.save(target_path, vmd_result)
