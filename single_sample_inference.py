@@ -105,18 +105,33 @@ def load_model_weights(trainer, model_path, device):
         state = raw
 
     # --- Compatibility Mapping ---
-    # Map 'mode_models' (old checkpoint name) to 'mode_processors' (new code name)
+    # Handles name changes between different model versions
+    mapping_rules = {
+        "mode_models.": "mode_processors.",
+        "fusion_value.": "fusion_query.",      # Map old fusion to one of the new fusion layers
+        "residual_proj.": "flow_residual_projection.",
+        "global_scale": "global_flow_residual_scale",
+    }
+    
     new_state = {}
-    mapped_count = 0
+    mapped_log = []
     for k, v in state.items():
-        if k.startswith("mode_models."):
-            new_key = k.replace("mode_models.", "mode_processors.", 1)
-            new_state[new_key] = v
-            mapped_count += 1
-        else:
-            new_state[k] = v
-    if mapped_count > 0:
-        print(f"  >> Mapped {mapped_count} keys from 'mode_models' to 'mode_processors'")
+        new_key = k
+        for old, new in mapping_rules.items():
+            if old in k:
+                new_key = k.replace(old, new)
+                mapped_log.append(f"{k} -> {new_key}")
+                break
+        new_state[new_key] = v
+    
+    if mapped_log:
+        print(f"  >> Mapped {len(mapped_log)} keys for compatibility (e.g., {mapped_log[0]})")
+        # If fusion_query was mapped but fusion_key is missing, duplicate it to avoid random weights
+        if "fusion_query.weight" in new_state and "fusion_key.weight" not in state:
+            new_state["fusion_key.weight"] = new_state["fusion_query.weight"].clone()
+            new_state["fusion_key.bias"] = new_state["fusion_query.bias"].clone()
+            print("  >> Initialized fusion_key from fusion_query weights")
+
     state = new_state
     # -----------------------------
 
