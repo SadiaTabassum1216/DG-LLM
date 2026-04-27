@@ -103,6 +103,23 @@ def load_model_weights(trainer, model_path, device):
         state = raw["model_state_dict"]
     else:
         state = raw
+
+    # --- Compatibility Mapping ---
+    # Map 'mode_models' (old checkpoint name) to 'mode_processors' (new code name)
+    new_state = {}
+    mapped_count = 0
+    for k, v in state.items():
+        if k.startswith("mode_models."):
+            new_key = k.replace("mode_models.", "mode_processors.", 1)
+            new_state[new_key] = v
+            mapped_count += 1
+        else:
+            new_state[k] = v
+    if mapped_count > 0:
+        print(f"  >> Mapped {mapped_count} keys from 'mode_models' to 'mode_processors'")
+    state = new_state
+    # -----------------------------
+
     missing, unexpected = trainer.model.load_state_dict(state, strict=False)
     if missing:
         print(f"  [Warning] Missing keys: {len(missing)}")
@@ -287,7 +304,7 @@ def main():
         for k in range(K):
             mode_flow = tvmd_dev[:, k, ...]
             mode_in = torch.cat([mode_flow, time_feats], dim=-1)
-            mode_pred_k, _ = trainer.model.mode_models[k](mode_in)
+            mode_pred_k, _ = trainer.model.mode_processors[k](mode_in)
             mode_pred_k = scaler.inverse_transform(mode_pred_k).cpu()
             mode_preds_unscaled.append(mode_pred_k)
 
