@@ -174,7 +174,7 @@ def main():
     print(f"  Device: {args.device} | Nodes: {args.num_nodes} | VMD K: {args.vmd_k}")
     print("=" * 70)
 
-    # ─── Load raw test + train data ──────────────────────────────────────
+    # --─ Load raw test + train data --------------------------------------
     data_dir = os.path.join(args.root_path, args.data, "processed")
 
     print("\n>> Loading data...")
@@ -215,7 +215,7 @@ def main():
     else:
         print(f"   Temporal features already present (F={x_test.shape[-1]})")
 
-    # ─── Select sample ──────────────────────────────────────────────────
+    # --─ Select sample --------------------------------------------------
     idx = args.sample_idx
     if idx >= x_test.shape[0]:
         print(f"   WARNING: sample_idx={idx} > max ({x_test.shape[0]-1}), using 0")
@@ -234,7 +234,7 @@ def main():
     print(f"\n>> Sample #{idx}")
     print(f"   Display nodes: {display_nodes}")
 
-    # ─── Compute VMD on-the-fly for this single sample ───────────────────
+    # --─ Compute VMD on-the-fly for this single sample ------------------─
     print(f"\n>> Computing VMD decomposition (K={args.vmd_k}) for sample #{idx}...")
     flow_window = x_sample[:, :, 0:1]  # [T, N, 1] — flow channel only
 
@@ -250,12 +250,12 @@ def main():
     reconstruction_err = np.abs(mode_sum - flow_window).mean()
     print(f"   Reconstruction error (|sum(modes) - original|): {reconstruction_err:.6f}")
 
-    # ─── Show VMD decomposition for display nodes ────────────────────────
-    print(f"\n{'─' * 70}")
-    print(f"  VMD DECOMPOSITION (input signal → {args.vmd_k} modes)")
-    print(f"{'─' * 70}")
+    # --─ Show VMD decomposition for display nodes ------------------------
+    print(f"\n{'-' * 70}")
+    print(f"  VMD DECOMPOSITION (input signal -> {args.vmd_k} modes)")
+    print(f"{'-' * 70}")
     for n in display_nodes:
-        print(f"\n  ── Node {n} ──")
+        print(f"\n  -- Node {n} --")
         header = f"  {'t':>4} | {'Original':>10}"
         for k in range(args.vmd_k):
             header += f" | {'Mode'+str(k+1):>10}"
@@ -270,7 +270,7 @@ def main():
             row += f" | {mode_sum[t, n, 0]:10.2f}"
             print(row)
 
-    # ─── Prepare tensors ─────────────────────────────────────────────────
+    # --─ Prepare tensors ------------------------------------------------─
     # Normalize x using scaler (flow channel only)
     x_normalized = x_sample.copy()
     x_normalized[:, :, 0] = (x_normalized[:, :, 0] - mean_val) / (std_val + 1e-8)
@@ -279,9 +279,9 @@ def main():
     vmd_normalized = (vmd_modes - mean_val) / (std_val + 1e-8)
 
     # Build tensors matching the pipeline:
-    #   tx = x.transpose(1,3) on [B, T, N, F] → but x from .npz is [T, N, F]
-    #   Need: [1, T, N, F] → transpose(1,3) → [1, F, N, T]
-    #   Then: x_in = tx.permute(0,3,2,1) → [1, T, N, F]
+    #   tx = x.transpose(1,3) on [B, T, N, F] -> but x from .npz is [T, N, F]
+    #   Need: [1, T, N, F] -> transpose(1,3) -> [1, F, N, T]
+    #   Then: x_in = tx.permute(0,3,2,1) -> [1, T, N, F]
     x_tensor = torch.from_numpy(x_normalized[np.newaxis]).float()  # [1, T, N, F]
     tx = x_tensor.transpose(1, 3)       # [1, F, N, T]
     x_in = tx.permute(0, 3, 2, 1)       # [1, T, N, F]
@@ -294,7 +294,7 @@ def main():
     # VMD tensor: [1, K, T, N, 1] — normalized
     vmd_tensor = torch.from_numpy(vmd_normalized[np.newaxis]).float()  # [1, K, T, N, 1]
 
-    # ─── Load Model ──────────────────────────────────────────────────────
+    # --─ Load Model ------------------------------------------------------
     print(f"\n>> Loading model from {args.model_path}...")
     adj_mx = load_adjacency(args.root_path, args.data, args.num_nodes)
 
@@ -323,7 +323,7 @@ def main():
     trainer.model.eval()
     print(f"   Model loaded ({trainer.model.param_num():,} parameters)")
 
-    # ─── Run Inference ───────────────────────────────────────────────────
+    # --─ Run Inference --------------------------------------------------─
     print("\n>> Running inference...")
     tx_dev = tx.to(args.device)
     x_in_dev = x_in.to(args.device)
@@ -352,16 +352,16 @@ def main():
 
     real_cpu = real_unscaled
 
-    # ─── Display: Input History ──────────────────────────────────────────
+    # --─ Display: Input History ------------------------------------------
     print("\n" + "=" * 70)
     print("  RESULTS")
     print("=" * 70)
 
     x_raw = x_sample  # original unnormalized [T, N, F]
 
-    print(f"\n{'─' * 70}")
+    print(f"\n{'-' * 70}")
     print(f"  INPUT HISTORY (last {args.input_len} timesteps, raw flow)")
-    print(f"{'─' * 70}")
+    print(f"{'-' * 70}")
     _print_header(["Step"] + [f"Node {n}" for n in display_nodes])
     for t in range(args.input_len):
         row = f"  t-{args.input_len - t:>2} "
@@ -369,11 +369,11 @@ def main():
             row += f" | {x_raw[t, n, 0]:10.2f}"
         print(row)
 
-    # ─── Display: Mode-wise Predictions ──────────────────────────────────
+    # --─ Display: Mode-wise Predictions ----------------------------------
     for k in range(K):
-        print(f"\n{'─' * 70}")
+        print(f"\n{'-' * 70}")
         print(f"  VMD MODE {k+1} PREDICTION (12 horizons)")
-        print(f"{'─' * 70}")
+        print(f"{'-' * 70}")
         _print_header(["Step"] + [f"Node {n}" for n in display_nodes])
         for t in range(args.output_len):
             row = f"  h={t+1:>2} "
@@ -381,10 +381,10 @@ def main():
                 row += f" | {mode_preds_unscaled[k][0, t, n, 0].item():10.2f}"
             print(row)
 
-    # ─── Display: Final Prediction ───────────────────────────────────────
-    print(f"\n{'─' * 70}")
+    # --─ Display: Final Prediction --------------------------------------─
+    print(f"\n{'-' * 70}")
     print(f"  FINAL PREDICTION (attention fusion + residual)")
-    print(f"{'─' * 70}")
+    print(f"{'-' * 70}")
     _print_header(["Step"] + [f"Node {n}" for n in display_nodes])
     for t in range(args.output_len):
         row = f"  h={t+1:>2} "
@@ -392,10 +392,10 @@ def main():
             row += f" | {pred_unscaled[0, t, n, 0].item():10.2f}"
         print(row)
 
-    # ─── Display: Ground Truth ───────────────────────────────────────────
-    print(f"\n{'─' * 70}")
+    # --─ Display: Ground Truth ------------------------------------------─
+    print(f"\n{'-' * 70}")
     print(f"  GROUND TRUTH")
-    print(f"{'─' * 70}")
+    print(f"{'-' * 70}")
     _print_header(["Step"] + [f"Node {n}" for n in display_nodes])
     for t in range(args.output_len):
         row = f"  h={t+1:>2} "
@@ -403,12 +403,12 @@ def main():
             row += f" | {real_cpu[0, t, n, 0].item():10.2f}"
         print(row)
 
-    # ─── Display: Side-by-side Pred vs Truth per node ────────────────────
-    print(f"\n{'─' * 70}")
+    # --─ Display: Side-by-side Pred vs Truth per node --------------------
+    print(f"\n{'-' * 70}")
     print(f"  PREDICTION vs GROUND TRUTH (per node, all 12 horizons)")
-    print(f"{'─' * 70}")
+    print(f"{'-' * 70}")
     for n in display_nodes:
-        print(f"\n  ── Node {n} ──")
+        print(f"\n  -- Node {n} --")
         print(f"  {'Step':>6} | {'Predicted':>10} | {'Truth':>10} | {'Error':>10} | {'%Err':>8}")
         print(f"  {'-'*55}")
         node_errs = []
@@ -424,10 +424,10 @@ def main():
         print(f"  {'-'*55}")
         print(f"  MAE={node_mae:.2f}  RMSE={node_rmse:.2f}")
 
-    # ─── Display: Per-horizon error across ALL nodes ─────────────────────
-    print(f"\n{'─' * 70}")
+    # --─ Display: Per-horizon error across ALL nodes --------------------─
+    print(f"\n{'-' * 70}")
     print(f"  PER-HORIZON ERROR (across all {args.num_nodes} nodes)")
-    print(f"{'─' * 70}")
+    print(f"{'-' * 70}")
     print(f"  {'Step':>6} | {'MAE':>8} | {'RMSE':>8} | {'MAPE':>8}")
     print(f"  {'-'*42}")
 
@@ -446,10 +446,10 @@ def main():
     print(f"  {'-'*42}")
     print(f"  AVG   | {np.mean(all_mae):8.2f} | {np.mean(all_rmse):8.2f} | {np.mean(all_mape):8.4f}")
 
-    # ─── Display: Mode contribution ──────────────────────────────────────
-    print(f"\n{'─' * 70}")
+    # --─ Display: Mode contribution --------------------------------------
+    print(f"\n{'-' * 70}")
     print(f"  MODE CONTRIBUTION (avg across all nodes per horizon)")
-    print(f"{'─' * 70}")
+    print(f"{'-' * 70}")
     mh = f"  {'Step':>6}"
     for k in range(K):
         mh += f" | {'Mode '+str(k+1):>10}"
@@ -467,7 +467,7 @@ def main():
         row += f" | {final_avg:10.2f} | {gt_avg:10.2f}"
         print(row)
 
-    # ─── Plot: Ground Truth vs Prediction ────────────────────────────────
+    # --─ Plot: Ground Truth vs Prediction --------------------------------
     import matplotlib.pyplot as plt
 
     num_display = len(display_nodes)
@@ -514,7 +514,7 @@ def main():
 
         # Vertical line separating input from forecast
         ax.axvline(x=args.input_len - 0.5, color='gray', linestyle=':', linewidth=1.5)
-        ax.text(args.input_len - 1, ax.get_ylim()[1] * 0.95, '← History | Forecast →',
+        ax.text(args.input_len - 1, ax.get_ylim()[1] * 0.95, '<- History | Forecast ->',
                 ha='center', fontsize=9, color='gray')
 
         ax.set_xticks(x_ticks)
@@ -534,10 +534,10 @@ def main():
     plt.close(fig)
     print(f"\n>> Plot saved to: {plot_path}")
 
-    # ─── Timing summary ─────────────────────────────────────────────────
-    print(f"\n{'─' * 70}")
+    # --─ Timing summary ------------------------------------------------─
+    print(f"\n{'-' * 70}")
     print(f"  TIMING SUMMARY")
-    print(f"{'─' * 70}")
+    print(f"{'-' * 70}")
     print(f"  VMD decomposition : {t_vmd*1000:8.1f} ms  ({args.num_nodes} nodes)")
     print(f"  Model inference   : {t_inference*1000:8.1f} ms")
     print(f"  Total per sample  : {(t_vmd + t_inference)*1000:8.1f} ms")
