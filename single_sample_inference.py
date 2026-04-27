@@ -140,8 +140,22 @@ def load_model_weights(trainer, model_path, device):
             new_state["fusion_key.bias"] = new_state["fusion_query.bias"].clone()
             print("  >> Initialized fusion_key from fusion_query weights")
 
-    state = new_state
-    # -----------------------------
+    # --- Size Mismatch Filtering ---
+    # Filter out keys that exist but have different shapes
+    model_state = trainer.model.state_dict()
+    final_state = {}
+    skipped_mismatches = 0
+    for k, v in new_state.items():
+        if k in model_state:
+            if v.shape != model_state[k].shape:
+                skipped_mismatches += 1
+                continue
+        final_state[k] = v
+    
+    if skipped_mismatches > 0:
+        print(f"  >> Skipped {skipped_mismatches} keys due to size mismatch (likely architectural changes)")
+    state = final_state
+    # -------------------------------
 
     missing, unexpected = trainer.model.load_state_dict(state, strict=False)
     if missing:
