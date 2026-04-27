@@ -115,23 +115,27 @@ def load_model_weights(trainer, model_path, device):
         "node_emb": "node_identity_emb",
         "global_step": "total_training_steps",
         "ema_A": "purely_dynamic_graph",
+        "Temb.": "temporal_embedding.",
+        "in_layer.": "feature_encoder.",
+        "start_conv.": "feature_encoder.", # fallback
     }
     
     new_state = {}
-    mapped_log = []
+    mapped_count = 0
     for k, v in state.items():
         new_key = k
         for old, new in mapping_rules.items():
-            if old in k:
-                new_key = k.replace(old, new)
-                mapped_log.append(f"{k} -> {new_key}")
-                break
+            if old in new_key:
+                new_key = new_key.replace(old, new)
+        
+        if new_key != k:
+            mapped_count += 1
         new_state[new_key] = v
     
-    if mapped_log:
-        print(f"  >> Mapped {len(mapped_log)} keys for compatibility")
+    if mapped_count > 0:
+        print(f"  >> Mapped {mapped_count} keys for compatibility")
         # If fusion_query was mapped but fusion_key is missing, duplicate it
-        if "fusion_query.weight" in new_state and "fusion_key.weight" not in state:
+        if "fusion_query.weight" in new_state and "fusion_key.weight" not in new_state:
             new_state["fusion_key.weight"] = new_state["fusion_query.weight"].clone()
             new_state["fusion_key.bias"] = new_state["fusion_query.bias"].clone()
             print("  >> Initialized fusion_key from fusion_query weights")
