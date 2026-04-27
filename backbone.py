@@ -96,6 +96,7 @@ class SpatialAwareGPT2Attention(GPT2Attention):
             query_len=query_len, key_len=key_len, device=hidden_states.device, dtype=query.dtype
         )
 
+        # --------------------------------------------------------
         # 2. Integrate Spatial/Graph Bias
         if attn_bias is not None:
             if attn_bias.dim() != 4 or attn_bias.size(2) != query_len or attn_bias.size(3) != key_len:
@@ -107,9 +108,9 @@ class SpatialAwareGPT2Attention(GPT2Attention):
                 attn_bias = attn_bias.expand(-1, num_heads, -1, -1)
             
             attention_bias = attention_bias + attn_bias.to(dtype=query.dtype)
-        elif not hasattr(self, "_logged_causal_only"):
-            print(f"[SpatialAwareGPT2Attention] Causal-only mode (no spatial bias). T={query_len}")
-            self._logged_causal_only = True
+        # elif not hasattr(self, "_logged_causal_only"):
+        #     print(f"[SpatialAwareGPT2Attention] Causal-only mode (no spatial bias). T={query_len}")
+        #     self._logged_causal_only = True
 
         # 3. Scaled Dot Product Attention
         attn_output = F.scaled_dot_product_attention(
@@ -369,6 +370,7 @@ class SpatialGPTBackbone(nn.Module):
             gpt2_model, input_ids, inputs_embeds, past_key_values, position_ids
         )
 
+# --------------------------------------------------------
         spatial_mask = self._build_spatial_mask(
             connectivity_matrix, hidden_states.size(1), device, hidden_states.dtype
         )
