@@ -108,9 +108,13 @@ def load_model_weights(trainer, model_path, device):
     # Handles name changes between different model versions
     mapping_rules = {
         "mode_models.": "mode_processors.",
-        "fusion_value.": "fusion_query.",      # Map old fusion to one of the new fusion layers
+        "fusion_value.": "fusion_query.",
         "residual_proj.": "flow_residual_projection.",
         "global_scale": "global_flow_residual_scale",
+        # ModeProcessor internal renames
+        "node_emb": "node_identity_emb",
+        "global_step": "total_training_steps",
+        "ema_A": "purely_dynamic_graph",
     }
     
     new_state = {}
@@ -125,8 +129,8 @@ def load_model_weights(trainer, model_path, device):
         new_state[new_key] = v
     
     if mapped_log:
-        print(f"  >> Mapped {len(mapped_log)} keys for compatibility (e.g., {mapped_log[0]})")
-        # If fusion_query was mapped but fusion_key is missing, duplicate it to avoid random weights
+        print(f"  >> Mapped {len(mapped_log)} keys for compatibility")
+        # If fusion_query was mapped but fusion_key is missing, duplicate it
         if "fusion_query.weight" in new_state and "fusion_key.weight" not in state:
             new_state["fusion_key.weight"] = new_state["fusion_query.weight"].clone()
             new_state["fusion_key.bias"] = new_state["fusion_query.bias"].clone()
@@ -138,10 +142,10 @@ def load_model_weights(trainer, model_path, device):
     missing, unexpected = trainer.model.load_state_dict(state, strict=False)
     if missing:
         print(f"  [Warning] Missing keys: {len(missing)}")
-        print(f"    Examples: {missing[:5]}")
+        print(f"    Examples (first 10): {missing[:10]}")
     if unexpected:
         print(f"  [Warning] Unexpected keys: {len(unexpected)}")
-        print(f"    Examples: {unexpected[:5]}")
+        print(f"    Examples (first 10): {unexpected[:10]}")
 
 
 def main():
