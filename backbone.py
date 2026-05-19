@@ -245,11 +245,23 @@ class SpatialGPTBackbone(nn.Module):
         for i, layer in enumerate(blocks):
             for name, param in layer.named_parameters():
                 if i < top_layer_start:
-                    # Freeze base weights except normalization and positional embeddings
-                    param.requires_grad = "ln" in name or "wpe" in name
+                    # Freeze EVERYTHING in lower layers, including LoRA adapters if present
+                    param.requires_grad = False
                 else:
-                    # Keep top layers trainable (excluding MLPs to favor attention tuning)
-                    param.requires_grad = "mlp" not in name
+                    # In top layers:
+                    # Keep LoRA adapters and LayerNorms trainable, freeze base weights (like MLP and base Attention)
+                    if "lora_" in name or "ln" in name:
+                        param.requires_grad = True
+                    else:
+                        param.requires_grad = False
+        
+        # Positional embeddings (wpe) are outside the blocks, at the root level of the model
+        self.gpt2.base_model.model.wpe.weight.requires_grad = True
+
+        # Final LayerNorm (ln_f) is applied after ALL blocks, directly before the regression head.
+        # It was accidentally frozen because it lives outside the block loop above.
+        self.gpt2.base_model.model.ln_f.weight.requires_grad = True
+        self.gpt2.base_model.model.ln_f.bias.requires_grad = True
 
     def _resolve_runtime_flags(
         self,

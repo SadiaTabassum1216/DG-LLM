@@ -74,6 +74,9 @@ def parse_args():
     parser.add_argument('--use_amp', '--use_bf16', action='store_true',
                         help='Enable mixed precision (auto-detects FP16 on T4/Turing, BF16 on Ampere+)')
     
+    parser.add_argument('--gat_aux_weight', type=float, default=0.01,
+                        help='Weight for GAT entropy auxiliary loss (0.0 to disable, default: 0.01)')
+
     args = parser.parse_args()
     
     # Derived attributes
@@ -149,6 +152,22 @@ def main():
     if not args.test_only:
         print(f"\n>> Starting Training from Epoch {start_epoch}...")
         training_log = {"epochs": [], "train_loss": [], "val_loss": [], "val_mae": [], "best_epoch": 0}
+
+        # ── Layer importance probe (runs once before training) ─────────────────
+        # Produces results/logs/diagnostics/layer_importance_probe.png
+        # Blue bars  = what each frozen layer WOULD learn if unfrozen.
+        # Green bars = what it actually learns under your current freeze config.
+        # Use this to validate whether freezing layers 0..(N-U-1) is appropriate.
+        print("\n>> Running layer importance probe (this takes ~1 min on CPU)...")
+        try:
+            probe_results = trainer.probe_layer_importance(
+                data['train_loader'], n_batches=10
+            )
+        except Exception as e:
+            print(f"  [WARNING] Probe failed: {e}")
+            probe_results = None
+
+        grad_norm_history = []   # one dict per epoch, for the trend chart
         
         epoch_pbar = tqdm(range(start_epoch, args.epochs + 1), desc="Training", unit="epoch")
         for epoch in epoch_pbar:
@@ -181,6 +200,10 @@ def main():
                 epoch_metrics.append(metrics)
             
             avg_train_loss = np.mean(epoch_loss)
+
+            # ── Collect per-layer grad norms for the trend chart ───────────────
+            # Grads are still populated from the last backward() of this epoch.
+            grad_norm_history.append(trainer.collect_epoch_grad_norms())
             
             # validate
             val_loss = []
@@ -223,6 +246,10 @@ def main():
         with open(log_path, 'w') as f:
             json.dump(training_log, f, indent=2)
         print(f"\n Training log saved to: {log_path}")
+
+        # ── Save per-layer gradient norm trend chart ───────────────────────────
+        if grad_norm_history:
+            trainer.save_grad_norm_trend(grad_norm_history)
     else:
         print("\n>> Skipping training (--test_only mode)")
 
@@ -269,7 +296,7 @@ def main():
                 tvmd = vmd.to(args.device, non_blocking=True)
                 x_in = tx  # BTNF
                 
-                pred, _ = trainer.model(tvmd, x_in)
+                pred, _, _ = trainer.model(tvmd, x_in)
                 preds_unscaled = data['scaler'].inverse_transform(pred)
                 reals_unscaled = data['scaler'].inverse_transform(ty)
                 

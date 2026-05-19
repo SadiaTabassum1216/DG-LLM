@@ -261,20 +261,32 @@ class ModeProcessor(nn.Module):
 
 
 
-    def _generate_adaptive_graph(self, features: torch.Tensor) -> torch.Tensor:
-        """Main entry point for building the adaptive graph through a 4-step pipeline."""
+    def _generate_adaptive_graph(self, features: torch.Tensor) -> tuple:
+        """
+        Main entry point for building the adaptive graph through a 4-step pipeline.
+
+        Returns:
+            binary_adj : Hard binary adjacency matrix used by the backbone (non-differentiable).
+            graph_prob  : Soft softmax attention weights BEFORE pruning — kept in the computation
+                          graph so that gradients flow back to gat_q / gat_k / gat_a.
+                          Used only for the auxiliary sparsity loss.
+        """
         # 1. Dynamic Graph Generation (GAT)
+        # graph_prob stays on the computation graph — do NOT detach here.
         graph_prob = self._apply_graph_attention(features)
-        
+
         # 2. Dynamic Graph Memory Update (EMA)
+        # We detach inside _update_dynamic_memory so the EMA buffer is a pure running stat.
         self._update_dynamic_memory(graph_prob)
-        
+
         # 3. Integration (Blend with Road Network)
         mix_alpha = self._get_blending_ratio()
         fused_scores = self._fuse_with_spatial_prior(self.purely_dynamic_graph, mix_alpha)
-        
-        # 4. Optimization (Pruning & Stability)
-        return self._prune_and_stabilize(fused_scores)
+
+        # 4. Optimization (Pruning & Stability) — produces the hard binary adj for the backbone.
+        # Pruning is non-differentiable, but graph_prob is returned separately for the aux loss.
+        binary_adj = self._prune_and_stabilize(fused_scores)
+        return binary_adj, graph_prob
 
 
 
@@ -305,20 +317,21 @@ class ModeProcessor(nn.Module):
 
         # 5. Dynamic Graph Generation
         if self.use_dynamic_graph:
-            adjacency = self._generate_adaptive_graph(fused_features)
+            adjacency, graph_prob = self._generate_adaptive_graph(fused_features)
         else:
             adjacency = self.adj_mx
+            graph_prob = None
 
         # 6. Backbone Processing & Prediction
         backbone_output = self.backbone(fused_features, adjacency)
         prediction = self.regression_layer(backbone_output.permute(0, 2, 1).unsqueeze(-1))
-        return prediction, adjacency
+        return prediction, adjacency, graph_prob
 
 
 class DGLLM(nn.Module):
     # Final Optimized Global Flow Residual Scaling Default Value
     DEFAULT_GLOBAL_FLOW_RESIDUAL_SCALE = 0.1    # [LEARNABLE]
-    
+
     def __init__(
         self,
         device,
@@ -331,10 +344,21 @@ class DGLLM(nn.Module):
         U,
         vmd_K,
         use_attention_fusion=True,
+        gat_aux_weight: float = 0.01,
     ):
-        """Initializes the master model that coordinates all VMD modes."""
+        """
+        Initializes the master model that coordinates all VMD modes.
+
+        Args:
+            gat_aux_weight: Weight for the GAT entropy auxiliary loss.
+                            This loss keeps gradients flowing into gat_q / gat_k / gat_a
+                            by minimising the entropy of the soft attention distribution
+                            (lower entropy = more peaked = sparser graph).
+                            Set to 0.0 to disable. Default: 0.01.
+        """
         super().__init__()
         self.use_attention_fusion = use_attention_fusion
+        self.gat_aux_weight = gat_aux_weight
 
         # --- 1. Mode Processing Components ---
         self.mode_processors = nn.ModuleList(
@@ -385,13 +409,15 @@ class DGLLM(nn.Module):
         # We pass each frequency mode through its own ModeProcessor
         mode_predictions = []
         learned_graphs = []
+        graph_probs = []           # soft GAT weights kept for the auxiliary loss
         for i in range(vmd_K):
             mode_flow = vmd_data[:, i, ...]
             mode_input = torch.cat([mode_flow, time_features], dim=-1)
 
-            pred, graph = self.mode_processors[i](mode_input)
+            pred, graph, graph_prob = self.mode_processors[i](mode_input)
             mode_predictions.append(pred)
             learned_graphs.append(graph)
+            graph_probs.append(graph_prob)
 
         # 2. Mode Fusion (Combining the predictions)
         if self.use_attention_fusion:
@@ -408,7 +434,21 @@ class DGLLM(nn.Module):
         flow_path = self.flow_residual_projection(raw_flow).permute(0, 2, 1).unsqueeze(-1)
         final_prediction = final_prediction + self.global_flow_residual_scale * flow_path
 
-        return final_prediction, learned_graphs
+        # 4. GAT Auxiliary Loss (entropy regularisation)
+        # graph_prob is [B, N, N] softmax output — still attached to the computation graph.
+        # Minimising row-entropy encourages the GAT to learn peaked (sparse) attention
+        # rather than collapsing to uniform distributions, and provides the gradient signal
+        # that flows back to gat_q, gat_k, gat_a, and the scalar GAT parameters.
+        gat_aux_loss = torch.tensor(0.0, device=raw_flow.device)
+        valid_probs = [gp for gp in graph_probs if gp is not None]
+        if valid_probs and self.gat_aux_weight > 0.0:
+            for gp in valid_probs:
+                # Row-wise Shannon entropy: H = -sum_j p_ij * log(p_ij)  shape [B, N]
+                row_entropy = -(gp * gp.clamp(min=1e-9).log()).sum(dim=-1)  # [B, N]
+                gat_aux_loss = gat_aux_loss + row_entropy.mean()
+            gat_aux_loss = gat_aux_loss / len(valid_probs)
+
+        return final_prediction, learned_graphs, gat_aux_loss
 
     def _blend_modes(self, mode_predictions):
         """Fuses mode predictions using a cross-mode attention mechanism."""

@@ -64,6 +64,277 @@ class Trainer:
         os.makedirs(self.log_dir, exist_ok=True)
         self.best_val_loss = float("inf")
 
+    def probe_layer_importance(self, data_loader, n_batches: int = 10, save_dir: str = None) -> dict:
+        """
+        Counterfactual gradient probe: answers "what would each frozen layer learn if unfrozen?"
+
+        Procedure
+        ---------
+        1. Save the current requires_grad state of every parameter.
+        2. Temporarily enable gradients for ALL GPT blocks (frozen and unfrozen alike).
+        3. Run `n_batches` of real forward+backward without an optimizer step.
+        4. Record per-GPT-layer gradient L2 norms.
+        5. Restore every parameter to its original requires_grad state.
+        6. Save a bar chart comparing "probe" (all-unfrozen) vs "actual" (your current config).
+
+        The resulting plot tells you:
+          - If a frozen layer shows a HIGH probe grad norm → you may be suppressing learning.
+          - If a frozen layer shows a LOW probe grad norm  → freezing it was the right call.
+
+        Args:
+            data_loader : DataLoader with a get_iterator() method (your standard loader).
+            n_batches   : Number of batches to average over (10 is usually enough).
+            save_dir    : Where to save the plot. Defaults to self.log_dir/diagnostics/.
+
+        Returns:
+            dict with keys 'probe_norms' and 'actual_norms', each a list indexed by GPT layer.
+        """
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        save_dir = save_dir or os.path.join(self.log_dir, "diagnostics")
+        os.makedirs(save_dir, exist_ok=True)
+
+        # ── 1. Snapshot current requires_grad state ────────────────────────────
+        saved_states = {
+            name: param.requires_grad
+            for name, param in self.model.named_parameters()
+        }
+
+        gpt_blocks = self.model.mode_processors[0].backbone.gpt2.base_model.model.h
+        n_layers = len(gpt_blocks)
+
+        # ── 2. Temporarily enable ALL GPT block gradients ─────────────────────
+        for processor in self.model.mode_processors:
+            for block in processor.backbone.gpt2.base_model.model.h:
+                for param in block.parameters():
+                    param.requires_grad = True
+
+        # ── 3. Accumulate gradients over n_batches ────────────────────────────
+        self.model.train()
+        for param in self.model.parameters():
+            if param.grad is not None:
+                param.grad = None
+
+        batches_run = 0
+        gat_weight = getattr(self.args, "gat_aux_weight", 0.01)
+
+        for x, y, vmd in data_loader.get_iterator():
+            if batches_run >= n_batches:
+                break
+            tx   = x.to(self.device, non_blocking=True)
+            ty   = y.to(self.device, non_blocking=True)
+            tvmd = vmd.to(self.device, non_blocking=True)
+
+            preds, _, gat_aux_loss = self.model(tvmd, tx)
+            preds_scaled = self.scaler.inverse_transform(preds)
+            task_loss    = self.loss_fn(preds_scaled, ty, 0.0)
+            loss         = task_loss + gat_weight * gat_aux_loss
+            loss.backward()
+            batches_run += 1
+
+        # ── 4. Collect per-layer probe grad norms (averaged across VMD modes) ──
+        probe_norms = []
+        for layer_idx in range(n_layers):
+            total_norm_sq = 0.0
+            for processor in self.model.mode_processors:
+                block = processor.backbone.gpt2.base_model.model.h[layer_idx]
+                for param in block.parameters():
+                    if param.grad is not None:
+                        total_norm_sq += param.grad.norm().item() ** 2
+            probe_norms.append(total_norm_sq ** 0.5 / len(self.model.mode_processors))
+
+        # ── 5. Restore original requires_grad state ───────────────────────────
+        for name, param in self.model.named_parameters():
+            param.requires_grad = saved_states[name]
+            if param.grad is not None:
+                param.grad = None           # clear probe grads
+
+        # ── 6. Collect "actual" norms (under current freeze config) ───────────
+        #      Run n_batches again with the real freeze config to get actual norms.
+        for param in self.model.parameters():
+            if param.grad is not None:
+                param.grad = None
+
+        batches_run = 0
+        for x, y, vmd in data_loader.get_iterator():
+            if batches_run >= n_batches:
+                break
+            tx   = x.to(self.device, non_blocking=True)
+            ty   = y.to(self.device, non_blocking=True)
+            tvmd = vmd.to(self.device, non_blocking=True)
+
+            preds, _, gat_aux_loss = self.model(tvmd, tx)
+            preds_scaled = self.scaler.inverse_transform(preds)
+            task_loss    = self.loss_fn(preds_scaled, ty, 0.0)
+            loss         = task_loss + gat_weight * gat_aux_loss
+            loss.backward()
+            batches_run += 1
+
+        actual_norms = []
+        for layer_idx in range(n_layers):
+            total_norm_sq = 0.0
+            for processor in self.model.mode_processors:
+                block = processor.backbone.gpt2.base_model.model.h[layer_idx]
+                for param in block.parameters():
+                    if param.grad is not None:
+                        total_norm_sq += param.grad.norm().item() ** 2
+            actual_norms.append(total_norm_sq ** 0.5 / len(self.model.mode_processors))
+
+        # Clear grads after probe is done
+        for param in self.model.parameters():
+            if param.grad is not None:
+                param.grad = None
+
+        # ── 7. Plot ───────────────────────────────────────────────────────────
+        labels       = [f"L{i}" for i in range(n_layers)]
+        x_pos        = range(n_layers)
+        width        = 0.38
+        frozen_start = n_layers - self.args.U   # first unfrozen layer index
+
+        fig, ax = plt.subplots(figsize=(max(8, n_layers * 1.1), 5))
+        fig.patch.set_facecolor("#0d1117")
+        ax.set_facecolor("#161b22")
+
+        bars_probe  = ax.bar([p - width / 2 for p in x_pos], probe_norms,
+                             width, label="Probe (all unfrozen)", color="#58a6ff", alpha=0.85)
+        bars_actual = ax.bar([p + width / 2 for p in x_pos], actual_norms,
+                             width, label=f"Actual (U={self.args.U} top unfrozen)", color="#3fb950", alpha=0.85)
+
+        # Shade frozen region
+        ax.axvspan(-0.5, frozen_start - 0.5, color="#ff7b72", alpha=0.07, label="Frozen zone")
+        ax.axvline(frozen_start - 0.5, color="#ff7b72", linewidth=1.5, linestyle="--", alpha=0.7)
+        ax.text(frozen_start - 0.5, ax.get_ylim()[1] * 0.95, "  freeze boundary",
+                color="#ff7b72", fontsize=8, va="top")
+
+        for bar, val in zip(bars_probe, probe_norms):
+            if val > 0:
+                ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
+                        f"{val:.1e}", ha="center", va="bottom", fontsize=6.5, color="#c9d1d9")
+        for bar, val in zip(bars_actual, actual_norms):
+            if val > 0:
+                ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
+                        f"{val:.1e}", ha="center", va="bottom", fontsize=6.5, color="#c9d1d9")
+
+        ax.set_xticks(list(x_pos))
+        ax.set_xticklabels(labels, color="#c9d1d9")
+        ax.set_ylabel("Gradient L2-Norm", color="#c9d1d9")
+        ax.set_xlabel("GPT Layer Index", color="#c9d1d9")
+        ax.tick_params(colors="#c9d1d9")
+        ax.set_title(
+            "Layer-by-Layer Gradient Probe\n"
+            "Blue = what each layer WOULD learn if unfrozen | "
+            "Green = what it actually learns now",
+            color="#e6edf3", fontsize=10, pad=10,
+        )
+        legend = ax.legend(facecolor="#21262d", edgecolor="#30363d", labelcolor="#c9d1d9", fontsize=8)
+        ax.spines[:].set_color("#30363d")
+
+        plt.tight_layout()
+        out_path = os.path.join(save_dir, "layer_importance_probe.png")
+        fig.savefig(out_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        print(f"  >> Layer importance probe saved to: {out_path}")
+
+        # ── 8. Print summary table ─────────────────────────────────────────────
+        print(f"\n  {'Layer':<8} {'Probe norm':>12} {'Actual norm':>13}  {'Status'}")
+        print(f"  {'-'*50}")
+        for i, (pn, an) in enumerate(zip(probe_norms, actual_norms)):
+            status = "[TRAIN]" if i >= frozen_start else "[FROZEN]"
+            flag   = ""
+            if i < frozen_start and pn > 1e-3:
+                flag = "  <-- consider unfreezing"
+            if i < frozen_start and pn < 1e-5:
+                flag = "  (ok to keep frozen)"
+            print(f"  L{i:<7} {pn:>12.4e} {an:>13.4e}  {status}{flag}")
+        print()
+
+        return {"probe_norms": probe_norms, "actual_norms": actual_norms}
+
+    def collect_epoch_grad_norms(self) -> dict:
+        """
+        Collect per-GPT-layer gradient L2 norms for the current epoch.
+        Call this immediately AFTER loss.backward() and BEFORE optimizer.zero_grad(),
+        i.e., at the END of each training epoch (after the last batch).
+
+        Returns a dict mapping layer index to its current grad norm.
+        Used to build a trend chart showing which layers are actively updating over time.
+        """
+        layer_norms = {}
+        for processor in self.model.mode_processors:
+            blocks = processor.backbone.gpt2.base_model.model.h
+            for i, block in enumerate(blocks):
+                norm_sq = sum(
+                    p.grad.norm().item() ** 2
+                    for p in block.parameters()
+                    if p.grad is not None
+                )
+                layer_norms[i] = layer_norms.get(i, 0.0) + norm_sq ** 0.5
+        # Average across VMD modes
+        n_modes = len(self.model.mode_processors)
+        return {i: v / n_modes for i, v in layer_norms.items()}
+
+    def save_grad_norm_trend(self, grad_norm_history: list, save_dir: str = None):
+        """
+        Save a per-layer gradient norm trend plot from the history collected during training.
+
+        Args:
+            grad_norm_history : list of dicts, one per epoch, from collect_epoch_grad_norms().
+            save_dir          : where to save. Defaults to self.log_dir/diagnostics/.
+        """
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        save_dir = save_dir or os.path.join(self.log_dir, "diagnostics")
+        os.makedirs(save_dir, exist_ok=True)
+
+        if not grad_norm_history:
+            return
+
+        n_layers = max(max(d.keys()) for d in grad_norm_history) + 1
+        epochs   = list(range(1, len(grad_norm_history) + 1))
+        frozen_start = n_layers - self.args.U
+
+        fig, ax = plt.subplots(figsize=(10, 5))
+        fig.patch.set_facecolor("#0d1117")
+        ax.set_facecolor("#161b22")
+
+        palette_frozen  = ["#ff7b72", "#ffa198", "#ffb8b1"]
+        palette_trained = ["#3fb950", "#58a6ff", "#d2a8ff", "#f0883e"]
+
+        for layer_idx in range(n_layers):
+            norms = [epoch_dict.get(layer_idx, 0.0) for epoch_dict in grad_norm_history]
+            if max(norms) < 1e-10:
+                continue  # completely frozen — skip to avoid visual noise
+            is_frozen = (layer_idx < frozen_start)
+            color  = palette_frozen[layer_idx % len(palette_frozen)] if is_frozen \
+                     else palette_trained[(layer_idx - frozen_start) % len(palette_trained)]
+            style  = "--" if is_frozen else "-"
+            label  = f"L{layer_idx} [frozen]" if is_frozen else f"L{layer_idx} [train]"
+            ax.plot(epochs, norms, linestyle=style, color=color, linewidth=1.6,
+                    marker="o", markersize=3, label=label)
+
+        ax.set_xlabel("Epoch", color="#c9d1d9")
+        ax.set_ylabel("Gradient L2-Norm", color="#c9d1d9")
+        ax.set_title(
+            "Per-Layer Gradient Norm Trend During Training\n"
+            "Solid = trainable layers | Dashed = frozen layers",
+            color="#e6edf3", fontsize=10,
+        )
+        ax.tick_params(colors="#c9d1d9")
+        ax.spines[:].set_color("#30363d")
+        legend = ax.legend(facecolor="#21262d", edgecolor="#30363d",
+                           labelcolor="#c9d1d9", fontsize=8, ncol=2)
+        plt.tight_layout()
+
+        out_path = os.path.join(save_dir, "grad_norm_trend.png")
+        fig.savefig(out_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        print(f"  >> Grad norm trend saved to: {out_path}")
+
+
     def save_checkpoint(self, epoch, val_loss, path):
         """Save training state for resuming later."""
         state = {
@@ -122,10 +393,14 @@ class Trainer:
             else nullcontext()
         )
         with ctx:
-            preds, _ = self.model(vmd_data, x_in)
+            preds, _, gat_aux_loss = self.model(vmd_data, x_in)
             preds_scaled = self.scaler.inverse_transform(preds)
             real_scaled = y_real
-            loss = self.loss_fn(preds_scaled, real_scaled, 0.0)
+            task_loss = self.loss_fn(preds_scaled, real_scaled, 0.0)
+            # Add GAT entropy aux loss to keep gradients flowing into gat_q/gat_k/gat_a.
+            # gat_aux_weight defaults to 0.01; set to 0.0 in args to disable.
+            gat_weight = getattr(self.args, "gat_aux_weight", 0.01)
+            loss = task_loss + gat_weight * gat_aux_loss
 
         loss = loss / self.grad_accum_steps
 
@@ -159,11 +434,12 @@ class Trainer:
             else nullcontext()
         )
         with torch.no_grad(), ctx:
-            preds, _ = self.model(vmd_data, x_in)
+            preds, _, _ = self.model(vmd_data, x_in)
 
         preds_scaled = self.scaler.inverse_transform(preds)
         real_scaled = y_real
 
+        # Use pure task loss for validation so metrics stay comparable across runs.
         loss = self.loss_fn(preds_scaled, real_scaled, 0.0).item()
         metrics = compute_metrics(preds_scaled, real_scaled)
 
@@ -189,7 +465,7 @@ class Trainer:
 
             x_in = tx
             with torch.no_grad():
-                preds, _ = self.model(tvmd, x_in)
+                preds, _, _ = self.model(tvmd, x_in)
 
             preds_scaled = self.scaler.inverse_transform(preds)
             real_scaled = ty
