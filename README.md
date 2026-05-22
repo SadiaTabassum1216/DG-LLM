@@ -80,4 +80,25 @@ This project is built upon the work of [ST-LLM](https://github.com/ChenxiLiu-HNU
 
 ## Citation
 
-Paper is currently under review. Citation information will be updated upon publication.
+Please cite our paper as:
+
+Tabassum S, Nower N (2026) DG-LLM: Decomposition-based dynamic graph adaptation of large language models for spatiotemporal traffic forecasting. PLOS ONE 21(5): e0349527. https://doi.org/10.1371/journal.pone.0349527
+
+BibTeX:
+
+```bibtex
+@article{10.1371/journal.pone.0349527,
+   doi = {10.1371/journal.pone.0349527},
+   author = {Tabassum, Sadia AND Nower, Naushin},
+   journal = {PLOS ONE},
+   publisher = {Public Library of Science},
+   title = {DG-LLM: Decomposition-based dynamic graph adaptation of large language models for spatiotemporal traffic forecasting},
+   year = {2026},
+   month = {05},
+   volume = {21},
+   url = {https://doi.org/10.1371/journal.pone.0349527},
+   pages = {1-33},
+   number = {5},
+
+}
+```
