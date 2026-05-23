@@ -37,8 +37,10 @@ def parse_args():
     # Model
     parser.add_argument('--llm_layer', type=int, default=6,
                         help='Number of GPT-2 layers to use (default: 6)')
-    parser.add_argument('--U', type=int, default=1,
-                        help='Top U layers are fully trainable (default: 1)')
+    parser.add_argument('--U', type=int, default=2,
+                        help='Top U layers are fully trainable (default: 2)')
+    parser.add_argument('--middle_lora_layers', type=int, default=2,
+                        help='Middle layers that keep LoRA + norm parameters trainable (default: 2)')
     parser.add_argument('--vmd_k', type=int, default=3,
                         help='Number of VMD modes (default: 3)')
     parser.add_argument('--lora_r', type=int, default=16, dest='lora_rank',

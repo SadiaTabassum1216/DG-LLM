@@ -47,6 +47,7 @@ class ModeProcessor(nn.Module):
         output_len,
         llm_layer,
         U,
+        middle_lora_layers=None,
         backbone_channel=DEFAULT_BACKBONE_CHANNEL,
         gpt_channel=DEFAULT_GPT_CHANNEL,
         use_dynamic_graph=True, # FOR ABALATION
@@ -124,7 +125,13 @@ class ModeProcessor(nn.Module):
         self.temporal_gate = nn.Linear(backbone_channel, backbone_channel)
 
         # Core Spatial-Temporal Backbone (GPT-based)
-        self.backbone = SpatialGPTBackbone(device, gpt_layers=llm_layer, U=U, dropout_rate=0.1)
+        self.backbone = SpatialGPTBackbone(
+            device,
+            gpt_layers=llm_layer,
+            U=U,
+            middle_lora_layers=middle_lora_layers,
+            dropout_rate=0.1,
+        )
         self.regression_layer = nn.Conv2d(backbone_channel, output_len, kernel_size=(1, 1))
 
 
@@ -343,6 +350,7 @@ class DGLLM(nn.Module):
         llm_layer,
         U,
         vmd_K,
+        middle_lora_layers=None,
         use_attention_fusion=True,
         gat_aux_weight: float = 0.01,
     ):
@@ -365,7 +373,7 @@ class DGLLM(nn.Module):
             [
                 ModeProcessor(
                     device, static_road_network, input_dim, num_nodes,
-                    input_len, output_len, llm_layer, U, use_dynamic_graph=True
+                    input_len, output_len, llm_layer, U, middle_lora_layers=middle_lora_layers, use_dynamic_graph=True
                 )
                 for _ in range(vmd_K)
             ]

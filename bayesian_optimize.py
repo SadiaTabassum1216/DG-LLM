@@ -178,7 +178,8 @@ if __name__ == '__main__':
     args.input_len = 12
     args.output_len = 12
     args.llm_layer = 6
-    args.U = 1
+    args.U = 2
+    args.middle_lora_layers = 2
     args.vmd_k = 3
     
     print(f"Loading {args.data} dataset...")

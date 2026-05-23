@@ -188,6 +188,7 @@ class SpatialGPTBackbone(nn.Module):
         device: str = "cuda:0",
         gpt_layers: int = 6,
         U: int = 1,
+        middle_lora_layers: Optional[int] = None,
         dropout_rate: float = 0.0,
         use_gradient_checkpointing: bool = True,
     ):
@@ -204,7 +205,10 @@ class SpatialGPTBackbone(nn.Module):
         """
         super().__init__()
         self.num_backbone_layers = gpt_layers
-        self.unfrozen_top_layers = U
+        self.unfrozen_top_layers = max(1, min(U, gpt_layers))
+        self.middle_lora_layers = (
+            self.unfrozen_top_layers if middle_lora_layers is None else max(0, min(middle_lora_layers, gpt_layers))
+        )
         self.dropout_rate = dropout_rate
         self.use_gradient_checkpointing = use_gradient_checkpointing
         self.lora_rank = 16
@@ -236,32 +240,33 @@ class SpatialGPTBackbone(nn.Module):
         )
         return get_peft_model(gpt2, lora_config)
 
+    def _get_layer_training_stage(self, layer_idx: int, total_layers: int) -> str:
+        """Return the adaptation stage for a block: bottom, middle, or top."""
+        top_start = max(0, total_layers - self.unfrozen_top_layers)
+        middle_start = max(0, top_start - self.middle_lora_layers)
+
+        if layer_idx >= top_start:
+            return "top"
+        if layer_idx >= middle_start:
+            return "middle"
+        return "bottom"
+
     def _freeze_lower_layers(self) -> None:
-        # Selectively freezes parameters to protect pre-trained weights while allowing top-layer tuning.
-        """Freezes lower layers and configures top-layer partial training."""
+        # Applies a three-tier adaptation policy based on the current evidence:
+        # bottom layers = mostly frozen, middle layers = LoRA-only adaptation,
+        # top layers = fully trainable except MLP blocks.
+        """Freezes lower layers and configures a three-tier adaptation policy."""
         blocks = self.gpt2.base_model.model.h
-        top_layer_start = len(blocks) - self.unfrozen_top_layers
 
         for i, layer in enumerate(blocks):
+            stage = self._get_layer_training_stage(i, len(blocks))
             for name, param in layer.named_parameters():
-                if i < top_layer_start:
-                    # Freeze EVERYTHING in lower layers, including LoRA adapters if present
-                    param.requires_grad = False
+                if stage == "bottom":
+                    param.requires_grad = ("ln" in name) or ("wpe" in name)
+                elif stage == "middle":
+                    param.requires_grad = ("ln" in name) or ("wpe" in name) or ("lora_" in name)
                 else:
-                    # In top layers:
-                    # Keep LoRA adapters and LayerNorms trainable, freeze base weights (like MLP and base Attention)
-                    if "lora_" in name or "ln" in name:
-                        param.requires_grad = True
-                    else:
-                        param.requires_grad = False
-        
-        # Positional embeddings (wpe) are outside the blocks, at the root level of the model
-        self.gpt2.base_model.model.wpe.weight.requires_grad = True
-
-        # Final LayerNorm (ln_f) is applied after ALL blocks, directly before the regression head.
-        # It was accidentally frozen because it lives outside the block loop above.
-        self.gpt2.base_model.model.ln_f.weight.requires_grad = True
-        self.gpt2.base_model.model.ln_f.bias.requires_grad = True
+                    param.requires_grad = "mlp" not in name
 
     def _resolve_runtime_flags(
         self,
@@ -395,7 +400,7 @@ class SpatialGPTBackbone(nn.Module):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
-            # Apply spatial bias only to the top unfrozen layers
+            # Apply spatial bias only to the top trainable layers.
             layer_attn_bias = spatial_mask if i >= top_layer_start else None
             layer_head_mask = head_mask[i] if head_mask is not None else None
 
