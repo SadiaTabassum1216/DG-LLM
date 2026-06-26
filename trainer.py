@@ -137,14 +137,33 @@ class Trainer:
 
         # ── 4. Collect per-layer probe grad norms (averaged across VMD modes) ──
         probe_norms = []
+        attn_norms = []
+        mlp_norms = []
+        ln_norms = []
+        
         for layer_idx in range(n_layers):
             total_norm_sq = 0.0
+            total_attn_sq = 0.0
+            total_mlp_sq = 0.0
+            total_ln_sq = 0.0
             for processor in self.model.mode_processors:
                 block = processor.backbone.gpt2.base_model.model.h[layer_idx]
-                for param in block.parameters():
+                for name, param in block.named_parameters():
                     if param.grad is not None:
-                        total_norm_sq += param.grad.norm().item() ** 2
-            probe_norms.append(total_norm_sq ** 0.5 / len(self.model.mode_processors))
+                        norm_sq = param.grad.norm().item() ** 2
+                        total_norm_sq += norm_sq
+                        if "attn" in name:
+                            total_attn_sq += norm_sq
+                        elif "mlp" in name:
+                            total_mlp_sq += norm_sq
+                        elif "ln" in name:
+                            total_ln_sq += norm_sq
+            
+            num_procs = len(self.model.mode_processors)
+            probe_norms.append(total_norm_sq ** 0.5 / num_procs)
+            attn_norms.append(total_attn_sq ** 0.5 / num_procs)
+            mlp_norms.append(total_mlp_sq ** 0.5 / num_procs)
+            ln_norms.append(total_ln_sq ** 0.5 / num_procs)
 
         # ── 5. Restore original requires_grad state ───────────────────────────
         for name, param in self.model.named_parameters():
@@ -239,16 +258,24 @@ class Trainer:
         print(f"  >> Layer importance probe saved to: {out_path}")
 
         # ── 8. Print summary table ─────────────────────────────────────────────
-        print(f"\n  {'Layer':<8} {'Probe norm':>12} {'Actual norm':>13}  {'Status'}")
-        print(f"  {'-'*50}")
-        for i, (pn, an) in enumerate(zip(probe_norms, actual_norms)):
-            status = "[TRAIN]" if i >= frozen_start else "[FROZEN]"
-            flag   = ""
-            if i < frozen_start and pn > 1e-3:
-                flag = "  <-- consider unfreezing"
-            if i < frozen_start and pn < 1e-5:
-                flag = "  (ok to keep frozen)"
-            print(f"  L{i:<7} {pn:>12.4e} {an:>13.4e}  {status}{flag}")
+        print(f"\n  {'Layer':<8} {'Probe norm':>12} | {'Attn norm':>11} | {'MLP norm':>11} | {'LN norm':>11}")
+        print(f"  {'-'*65}")
+        for i, (pn, attn_n, mlp_n, ln_n) in enumerate(zip(probe_norms, attn_norms, mlp_norms, ln_norms)):
+            print(f"  L{i:<7} {pn:>12.4e} | {attn_n:>11.4e} | {mlp_n:>11.4e} | {ln_n:>11.4e}")
+
+        # Summary of which component has the most info across all layers
+        total_attn = sum(attn_norms)
+        total_mlp = sum(mlp_norms)
+        total_ln = sum(ln_norms)
+        print(f"\n  [Summary of Components across all layers]")
+        print(f"  Total Attention Norm : {total_attn:.4e}")
+        print(f"  Total MLP Norm       : {total_mlp:.4e}")
+        print(f"  Total LayerNorm Norm : {total_ln:.4e}")
+        
+        # Max layer
+        max_layer = np.argmax(probe_norms)
+        print(f"\n  [Conclusion]")
+        print(f"  Layer storing most info (highest grad norm): L{max_layer} ({probe_norms[max_layer]:.4e})")
         print()
 
         return {"probe_norms": probe_norms, "actual_norms": actual_norms}

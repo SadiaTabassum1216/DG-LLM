@@ -252,21 +252,12 @@ class SpatialGPTBackbone(nn.Module):
         return "bottom"
 
     def _freeze_lower_layers(self) -> None:
-        # Applies a three-tier adaptation policy based on the current evidence:
-        # bottom layers = mostly frozen, middle layers = LoRA-only adaptation,
-        # top layers = fully trainable except MLP blocks.
         """Freezes lower layers and configures a three-tier adaptation policy."""
         blocks = self.gpt2.base_model.model.h
 
         for i, layer in enumerate(blocks):
-            stage = self._get_layer_training_stage(i, len(blocks))
             for name, param in layer.named_parameters():
-                if stage == "bottom":
-                    param.requires_grad = ("ln" in name) or ("wpe" in name)
-                elif stage == "middle":
-                    param.requires_grad = ("ln" in name) or ("wpe" in name) or ("lora_" in name)
-                else:
-                    param.requires_grad = "mlp" not in name
+                param.requires_grad = True
 
     def _resolve_runtime_flags(
         self,
