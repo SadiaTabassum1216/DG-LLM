@@ -31,9 +31,15 @@ class TemporalEmbedding(nn.Module):
         # Extract features for the most recent timestep
         # Feature 1: Time of Day (normalized 0-1)
         # Feature 2: Day of Week (integer 0-6)
-        tod_raw = input_tensor[:, -1, :, 1]   
-        dow_raw = input_tensor[:, -1, :, 2]  
-        
+        features_dim = input_tensor.size(-1)
+        if features_dim >= 3:
+            tod_raw = input_tensor[:, -1, :, 1]   
+            dow_raw = input_tensor[:, -1, :, 2]  
+        else:
+            # Fallback if dataset only provides the flow feature (1 dimension)
+            tod_raw = torch.zeros_like(input_tensor[:, -1, :, 0])
+            dow_raw = torch.zeros_like(input_tensor[:, -1, :, 0])
+            
         # Convert floating point features to discrete embedding indices
         tod_idx = (tod_raw * self.daily_intervals).long().clamp(0, self.daily_intervals - 1)
         dow_idx = dow_raw.long().clamp(0, 6)
