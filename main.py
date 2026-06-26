@@ -168,6 +168,8 @@ def main():
         except Exception as e:
             print(f"  [WARNING] Probe failed: {e}")
             probe_results = None
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
         grad_norm_history = []   # one dict per epoch, for the trend chart
         
