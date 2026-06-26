@@ -47,6 +47,7 @@ class ModeProcessor(nn.Module):
         output_len,
         llm_layer,
         U,
+        unfrozen_bottom_layers=2,
         middle_lora_layers=None,
         backbone_channel=DEFAULT_BACKBONE_CHANNEL,
         gpt_channel=DEFAULT_GPT_CHANNEL,
@@ -129,6 +130,7 @@ class ModeProcessor(nn.Module):
             device,
             gpt_layers=llm_layer,
             U=U,
+            unfrozen_bottom_layers=unfrozen_bottom_layers,
             middle_lora_layers=middle_lora_layers,
             dropout_rate=0.1,
         )
@@ -350,6 +352,7 @@ class DGLLM(nn.Module):
         llm_layer,
         U,
         vmd_K,
+        unfrozen_bottom_layers=2,
         middle_lora_layers=None,
         use_attention_fusion=True,
         gat_aux_weight: float = 0.01,
@@ -373,7 +376,7 @@ class DGLLM(nn.Module):
             [
                 ModeProcessor(
                     device, static_road_network, input_dim, num_nodes,
-                    input_len, output_len, llm_layer, U, middle_lora_layers=middle_lora_layers, use_dynamic_graph=True
+                    input_len, output_len, llm_layer, U, unfrozen_bottom_layers=unfrozen_bottom_layers, middle_lora_layers=middle_lora_layers, use_dynamic_graph=True
                 )
                 for _ in range(vmd_K)
             ]

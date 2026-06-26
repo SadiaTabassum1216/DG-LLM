@@ -23,6 +23,7 @@ class Trainer:
             args.output_len,
             args.llm_layer,
             args.U,
+            unfrozen_bottom_layers=getattr(args, "unfrozen_bottom_layers", 2),
             middle_lora_layers=getattr(args, "middle_lora_layers", None),
             vmd_K=args.vmd_k,
         ).to(device)

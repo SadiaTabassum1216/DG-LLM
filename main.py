@@ -39,6 +39,8 @@ def parse_args():
                         help='Number of GPT-2 layers to use (default: 6)')
     parser.add_argument('--U', type=int, default=2,
                         help='Top U layers are fully trainable (default: 2)')
+    parser.add_argument('--unfrozen_bottom_layers', type=int, default=2,
+                        help='Number of bottom layers where MLP is fully trainable (default: 2)')
     parser.add_argument('--middle_lora_layers', type=int, default=2,
                         help='Middle layers that keep LoRA + norm parameters trainable (default: 2)')
     parser.add_argument('--vmd_k', type=int, default=3,

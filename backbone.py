@@ -188,6 +188,7 @@ class SpatialGPTBackbone(nn.Module):
         device: str = "cuda:0",
         gpt_layers: int = 6,
         U: int = 1,
+        unfrozen_bottom_layers: int = 2,
         middle_lora_layers: Optional[int] = None,
         dropout_rate: float = 0.0,
         use_gradient_checkpointing: bool = True,
@@ -206,6 +207,7 @@ class SpatialGPTBackbone(nn.Module):
         super().__init__()
         self.num_backbone_layers = gpt_layers
         self.unfrozen_top_layers = max(1, min(U, gpt_layers))
+        self.unfrozen_bottom_layers = unfrozen_bottom_layers
         self.middle_lora_layers = (
             self.unfrozen_top_layers if middle_lora_layers is None else max(0, min(middle_lora_layers, gpt_layers))
         )
@@ -252,12 +254,32 @@ class SpatialGPTBackbone(nn.Module):
         return "bottom"
 
     def _freeze_lower_layers(self) -> None:
-        """Freezes lower layers and configures a three-tier adaptation policy."""
+        """
+        Data-driven partial freezing strategy based on gradient probe:
+        - Lower layers: MLP unfrozen, LN unfrozen, Attention base frozen (LoRA active)
+        - Top layers: MLP frozen, Attention base frozen, LN unfrozen (LoRA active)
+        """
         blocks = self.gpt2.base_model.model.h
-
+        
         for i, layer in enumerate(blocks):
+            is_lower_layer = i < self.unfrozen_bottom_layers
+            
             for name, param in layer.named_parameters():
-                param.requires_grad = True
+                # 1. Always keep LoRA parameters trainable
+                if "lora_" in name:
+                    param.requires_grad = True
+                
+                # 2. Always keep LayerNorm and Positional embeddings trainable (cheap & useful)
+                elif "ln" in name or "wpe" in name:
+                    param.requires_grad = True
+                
+                # 3. MLP blocks: Trainable ONLY in the lower layers (where they learn the most)
+                elif "mlp" in name:
+                    param.requires_grad = is_lower_layer
+                
+                # 4. Attention base weights (c_attn) and anything else: Frozen
+                else:
+                    param.requires_grad = False
 
     def _resolve_runtime_flags(
         self,
