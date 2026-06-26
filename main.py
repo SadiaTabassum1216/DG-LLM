@@ -43,6 +43,8 @@ def parse_args():
                         help='Middle layers that keep LoRA + norm parameters trainable (default: 2)')
     parser.add_argument('--vmd_k', type=int, default=3,
                         help='Number of VMD modes (default: 3)')
+    parser.add_argument('--vmd_cache_dir', type=str, default='./vmd_cache',
+                        help='Path to the directory containing precomputed VMD modes')
     parser.add_argument('--lora_r', type=int, default=16, dest='lora_rank',
                         help='LoRA rank r (default: 16)')
     parser.add_argument('--lora_alpha', type=int, default=32,

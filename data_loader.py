@@ -161,6 +161,8 @@ def _load_or_extract_vmd_modes(split_name, split_input, args, input_cache_dir, o
 
     # Cache missing: compute VMD.
     print(f"  [Cache Miss] Computing VMD for {split_name} (K={args.vmd_k})...")
+    print(f"               Looked in: {os.path.abspath(input_path)}")
+    print(f"               And in:    {os.path.abspath(target_path)}")
     vmd_result = precompute_vmd(split_input, vmd_k=args.vmd_k, max_workers=4)
     
     try:
