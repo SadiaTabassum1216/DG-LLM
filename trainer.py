@@ -12,7 +12,14 @@ class Trainer:
     def __init__(self, args, scaler, adj_mx, device):
         self.args = args
         self.device = device
-        self.scaler = scaler       
+        daily_intervals = getattr(args, "steps_per_day", None) or getattr(args, "daily_intervals", 288)
+        global_res_scale = getattr(args, "global_residual_scale", 0.40)
+        init_static_weight = getattr(args, "initial_static_weight", 0.85)
+        final_static_weight = getattr(args, "final_static_weight", 0.70)
+        pruning_ratio = getattr(args, "pruning_keep_ratio", 0.15)
+        dropout_rate = getattr(args, "dropout", 0.1)
+        lora_rank = getattr(args, "lora_rank", 16)
+        lora_alpha = getattr(args, "lora_alpha", 32)
 
         self.model = DGLLM(
             device,
@@ -24,6 +31,14 @@ class Trainer:
             args.llm_layer,
             args.U,
             vmd_K=args.vmd_k,
+            daily_intervals=daily_intervals,
+            global_flow_residual_scale=global_res_scale,
+            initial_static_weight=init_static_weight,
+            final_static_weight=final_static_weight,
+            pruning_keep_ratio=pruning_ratio,
+            dropout_rate=dropout_rate,
+            lora_rank=lora_rank,
+            lora_alpha=lora_alpha,
         ).to(device)
 
         if hasattr(args, "enable_compile") and args.enable_compile:
@@ -170,63 +185,82 @@ class Trainer:
         return loss, metrics
 
     def test(self, test_loader, model_path=None):
-        """Evaluate the test split and report per-horizon metrics."""
+        """Evaluate the test split and report detailed per-horizon metrics."""
         if model_path is not None:
             self.load_model(model_path, strict=False)
 
         self.model.eval()
 
-        horizon_mae = [[] for _ in range(self.args.output_len)]
-        horizon_mape = [[] for _ in range(self.args.output_len)]
-        horizon_rmse = [[] for _ in range(self.args.output_len)]
+        all_preds = []
+        all_reals = []
 
         print(">> Starting Detailed Horizon Evaluation...")
 
-        for x, y, vmd in tqdm(test_loader.get_iterator(), desc="Testing"):
-            tx = x.to(self.device, non_blocking=True)
-            ty = y.to(self.device, non_blocking=True)
-            tvmd = vmd.to(self.device, non_blocking=True)
+        with torch.no_grad():
+            for x, y, vmd in tqdm(test_loader.get_iterator(), desc="Testing"):
+                tx = x.to(self.device, non_blocking=True)
+                ty = y.to(self.device, non_blocking=True)
+                tvmd = vmd.to(self.device, non_blocking=True)
 
-            x_in = tx
-            with torch.no_grad():
-                preds, _ = self.model(tvmd, x_in)
+                preds, _ = self.model(tvmd, tx)
+                preds_scaled = self.scaler.inverse_transform(preds)
 
-            preds_scaled = self.scaler.inverse_transform(preds)
-            real_scaled = ty
+                all_preds.append(preds_scaled.cpu().numpy())
+                all_reals.append(ty.cpu().numpy())
 
-            for t in range(self.args.output_len):
-                p = preds_scaled[:, t, ...]
-                r = real_scaled[:, t, ...]
+        # Concatenate across batches: [Total_Samples, Horizon, Nodes, 1]
+        all_preds = np.concatenate(all_preds, axis=0)
+        all_reals = np.concatenate(all_reals, axis=0)
 
-                horizon_mae[t].append(MAE_torch(p, r, 0).item())
-                horizon_mape[t].append(MAPE_torch(p, r, 0).item())
-                horizon_rmse[t].append(RMSE_torch(p, r, 0).item())
+        print("\n" + "=" * 62)
+        print(f"{'Horizon':<9} | {'MAE':<8} | {'MAPE':<8} | {'RMSE':<8} | {'R2':<8} | {'CORR':<8}")
+        print("-" * 62)
 
-        print("\n" + "=" * 50)
-        print(f"{'Horizon':<10} | {'MAE':<10} | {'MAPE':<10} | {'RMSE':<10}")
-        print("-" * 50)
+        total_mae, total_mape, total_rmse, total_r2, total_corr = [], [], [], [], []
 
-        total_mae, total_mape, total_rmse = [], [], []
         for i in range(self.args.output_len):
-            m_mae = np.mean(horizon_mae[i])
-            m_mape = np.mean(horizon_mape[i])
-            m_rmse = np.mean(horizon_rmse[i])
+            p = all_preds[:, i, :, 0].flatten()
+            r = all_reals[:, i, :, 0].flatten()
+
+            # Non-zero mask for safe division
+            mask = (r > 0)
+            p_m, r_m = p[mask], r[mask]
+
+            m_mae = np.mean(np.abs(r_m - p_m))
+            m_mape = np.mean(np.abs((r_m - p_m) / r_m))
+            m_rmse = np.sqrt(np.mean((r_m - p_m) ** 2))
+
+            # R2 Score
+            ss_res = np.sum((r_m - p_m) ** 2)
+            ss_tot = np.sum((r_m - np.mean(r_m)) ** 2)
+            m_r2 = 1.0 - (ss_res / (ss_tot + 1e-8))
+
+            # Pearson Correlation
+            r_diff = r_m - np.mean(r_m)
+            p_diff = p_m - np.mean(p_m)
+            m_corr = np.sum(r_diff * p_diff) / (np.sqrt(np.sum(r_diff ** 2) * np.sum(p_diff ** 2)) + 1e-8)
 
             total_mae.append(m_mae)
             total_mape.append(m_mape)
             total_rmse.append(m_rmse)
+            total_r2.append(m_r2)
+            total_corr.append(m_corr)
 
-            print(f"Step {i + 1:02d}    | {m_mae:<10.4f} | {m_mape:<10.4f} | {m_rmse:<10.4f}")
+            print(
+                f"Step {i + 1:02d}   | {m_mae:<8.4f} | {m_mape:<8.4f} | {m_rmse:<8.4f} | {m_r2:<8.4f} | {m_corr:<8.4f}"
+            )
 
-        print("-" * 50)
+        print("-" * 62)
         print(
-            f"AVERAGE    | {np.mean(total_mae):<10.4f} | "
-            f"{np.mean(total_mape):<10.4f} | {np.mean(total_rmse):<10.4f}"
+            f"AVERAGE   | {np.mean(total_mae):<8.4f} | {np.mean(total_mape):<8.4f} | "
+            f"{np.mean(total_rmse):<8.4f} | {np.mean(total_r2):<8.4f} | {np.mean(total_corr):<8.4f}"
         )
-        print("=" * 50)
+        print("=" * 62)
 
         return {
             "mae": float(np.mean(total_mae)),
             "rmse": float(np.mean(total_rmse)),
             "mape": float(np.mean(total_mape)),
+            "r2": float(np.mean(total_r2)),
+            "corr": float(np.mean(total_corr)),
         }

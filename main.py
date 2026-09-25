@@ -19,10 +19,11 @@ def parse_args():
     
     # Dataset
     parser.add_argument('--data', type=str, default='PEMSD04',
-                        choices=['PEMSD04', 'PEMSD08', 'bike_drop', 'bike_pick', 'taxi_drop', 'taxi_pick'],
-                        help='Dataset name (default: PEMSD04)')
+                        help='Dataset name (e.g. dhaka, PEMSD04, PEMSD08, bike_drop, taxi_drop)')
     parser.add_argument('--root_path', type=str, default=str(DATASET_DIR),
                         help='Root path for datasets')
+    parser.add_argument('--steps_per_day', type=int, default=None,
+                        help='Timesteps in one day (default: auto-detected, 144 for dhaka, 288 for PeMS)')
     
     # Training
     parser.add_argument('--epochs', type=int, default=50,
@@ -45,6 +46,16 @@ def parse_args():
                         help='LoRA rank r (default: 16)')
     parser.add_argument('--lora_alpha', type=int, default=32,
                         help='LoRA alpha scaling factor (default: 32)')
+    parser.add_argument('--initial_static_weight', type=float, default=0.85,
+                        help='Initial static road network prior weight (default: 0.85)')
+    parser.add_argument('--final_static_weight', type=float, default=0.70,
+                        help='Final/adaptive static road network prior weight (default: 0.70)')
+    parser.add_argument('--pruning_keep_ratio', type=float, default=0.15,
+                        help='Dynamic graph edge pruning retention ratio (default: 0.15)')
+    parser.add_argument('--global_residual_scale', type=float, default=0.40,
+                        help='Global persistence/residual shortcut scale (default: 0.40)')
+    parser.add_argument('--dropout', type=float, default=0.1,
+                        help='Dropout rate for backbone and graph representations (default: 0.1)')
     
     # I/O dimensions
     parser.add_argument('--input_dim', type=int, default=3,
@@ -79,17 +90,43 @@ def parse_args():
     # Derived attributes
     args.data_path = os.path.join(args.root_path, args.data, 'processed')
     
+    # Check config.npz if present in processed folder
+    cfg_file = os.path.join(args.data_path, 'config.npz')
+    detected_nodes = None
+    detected_steps = None
+    if os.path.exists(cfg_file):
+        try:
+            cfg = np.load(cfg_file)
+            if 'num_nodes' in cfg:
+                detected_nodes = int(cfg['num_nodes'])
+            if 'steps_per_day' in cfg:
+                detected_steps = int(cfg['steps_per_day'])
+        except Exception:
+            pass
+
     # Dataset-specific node counts
-    if 'PEMSD04' in args.data:
+    if detected_nodes is not None:
+        args.num_nodes = detected_nodes
+    elif 'pems04' in args.data.lower() or 'pemsd04' in args.data.lower():
         args.num_nodes = 307
-    elif 'PEMSD08' in args.data:
+    elif 'pems08' in args.data.lower() or 'pemsd08' in args.data.lower():
         args.num_nodes = 170
-    elif 'bike' in args.data:
+    elif 'dhaka' in args.data.lower():
+        args.num_nodes = 81
+    elif 'bike' in args.data.lower():
         args.num_nodes = 250
-    elif 'taxi' in args.data:
+    elif 'taxi' in args.data.lower():
         args.num_nodes = 266
     else:
         args.num_nodes = 307  # Default
+
+    if args.steps_per_day is None:
+        if detected_steps is not None:
+            args.steps_per_day = detected_steps
+        elif 'dhaka' in args.data.lower():
+            args.steps_per_day = 144
+        else:
+            args.steps_per_day = 288
     
     # Device
     args.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')

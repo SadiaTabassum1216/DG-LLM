@@ -49,11 +49,15 @@ class ModeProcessor(nn.Module):
         U,
         backbone_channel=DEFAULT_BACKBONE_CHANNEL,
         gpt_channel=DEFAULT_GPT_CHANNEL,
-        use_dynamic_graph=True, # FOR ABALATION
+        use_dynamic_graph=True, # FOR ABLATION
         heads=4,
-        pruning_keep_ratio=GRAPH_PRUNING_KEEP_RATIO,
-        initial_static_weight=INITIAL_STATIC_GRAPH_WEIGHT,
-        final_static_weight=FINAL_STATIC_GRAPH_WEIGHT,
+        pruning_keep_ratio=None,
+        initial_static_weight=None,
+        final_static_weight=None,
+        daily_intervals=DEFAULT_TIME_STEPS,
+        dropout_rate=0.1,
+        lora_rank=16,
+        lora_alpha=32,
     ):
         """Initializes a mode-specific processor that combines spatial and temporal patterns."""
         super().__init__()
@@ -68,7 +72,7 @@ class ModeProcessor(nn.Module):
         self.heads = heads
         self.gpt_channel = gpt_channel
         self.backbone_channel = backbone_channel
-        self.time_steps = self.DEFAULT_TIME_STEPS
+        self.time_steps = daily_intervals if daily_intervals is not None else self.DEFAULT_TIME_STEPS
 
         # --- 2. Memory & State (Buffers) ---
         self.register_buffer("total_training_steps", torch.zeros((), dtype=torch.long))
@@ -86,9 +90,9 @@ class ModeProcessor(nn.Module):
         self.graph_edge_dropout = self.GRAPH_EDGE_DROPOUT
         self.symmetrize = self.DEFAULT_SYMMETRIZE
         self.graph_learning_warmup = self.GRAPH_LEARNING_WARMUP
-        self.pruning_keep_ratio = pruning_keep_ratio
-        self.initial_static_weight = initial_static_weight
-        self.final_static_weight = final_static_weight
+        self.pruning_keep_ratio = pruning_keep_ratio if pruning_keep_ratio is not None else self.GRAPH_PRUNING_KEEP_RATIO
+        self.initial_static_weight = initial_static_weight if initial_static_weight is not None else self.INITIAL_STATIC_GRAPH_WEIGHT
+        self.final_static_weight = final_static_weight if final_static_weight is not None else self.FINAL_STATIC_GRAPH_WEIGHT
 
         # --- 4. Learnable Parameters ---
         # [LEARNABLE] Graph Attention Temperature
@@ -97,7 +101,7 @@ class ModeProcessor(nn.Module):
         self.node_degree_base_prior = nn.Parameter(torch.tensor(self.DEFAULT_NODE_DEGREE_BASE_PRIOR))
         self.node_degree_importance_scale = nn.Parameter(torch.tensor(self.DEFAULT_NODE_DEGREE_IMPORTANCE_SCALE))
         # [LEARNABLE] Adaptive Gating (Static vs Dynamic balance)
-        initial_logit = math.log(self.FINAL_STATIC_GRAPH_WEIGHT / (1.0 - self.FINAL_STATIC_GRAPH_WEIGHT + self.eps))
+        initial_logit = math.log(self.final_static_weight / (1.0 - self.final_static_weight + self.eps))
         self.learnable_static_weight_logit = nn.Parameter(torch.tensor(initial_logit))
 
         # --- 5. Input Embedding Layers ---
@@ -124,7 +128,14 @@ class ModeProcessor(nn.Module):
         self.temporal_gate = nn.Linear(backbone_channel, backbone_channel)
 
         # Core Spatial-Temporal Backbone (GPT-based)
-        self.backbone = SpatialGPTBackbone(device, gpt_layers=llm_layer, U=U, dropout_rate=0.1)
+        self.backbone = SpatialGPTBackbone(
+            device,
+            gpt_layers=llm_layer,
+            U=U,
+            dropout_rate=dropout_rate,
+            lora_rank=lora_rank,
+            lora_alpha=lora_alpha,
+        )
         self.regression_layer = nn.Conv2d(backbone_channel, output_len, kernel_size=(1, 1))
 
 
@@ -253,7 +264,8 @@ class ModeProcessor(nn.Module):
             final_graph = torch.maximum(final_graph, final_graph.t())
             
         # Global Step and Warmup Logic
-        self.total_training_steps += 1
+        if self.training:
+            self.total_training_steps += 1
         if self.total_training_steps.item() < self.graph_learning_warmup:
             final_graph = torch.maximum(final_graph, self.binary_adj_mx)
             
@@ -267,7 +279,8 @@ class ModeProcessor(nn.Module):
         graph_prob = self._apply_graph_attention(features)
         
         # 2. Dynamic Graph Memory Update (EMA)
-        self._update_dynamic_memory(graph_prob)
+        if self.training:
+            self._update_dynamic_memory(graph_prob)
         
         # 3. Integration (Blend with Road Network)
         mix_alpha = self._get_blending_ratio()
@@ -317,7 +330,7 @@ class ModeProcessor(nn.Module):
 
 class DGLLM(nn.Module):
     # Final Optimized Global Flow Residual Scaling Default Value
-    DEFAULT_GLOBAL_FLOW_RESIDUAL_SCALE = 0.1    # [LEARNABLE]
+    DEFAULT_GLOBAL_FLOW_RESIDUAL_SCALE = 0.40    # [LEARNABLE]
     
     def __init__(
         self,
@@ -331,6 +344,14 @@ class DGLLM(nn.Module):
         U,
         vmd_K,
         use_attention_fusion=True,
+        daily_intervals=None,
+        global_flow_residual_scale=None,
+        initial_static_weight=None,
+        final_static_weight=None,
+        pruning_keep_ratio=None,
+        dropout_rate=0.1,
+        lora_rank=16,
+        lora_alpha=32,
     ):
         """Initializes the master model that coordinates all VMD modes."""
         super().__init__()
@@ -340,8 +361,22 @@ class DGLLM(nn.Module):
         self.mode_processors = nn.ModuleList(
             [
                 ModeProcessor(
-                    device, static_road_network, input_dim, num_nodes,
-                    input_len, output_len, llm_layer, U, use_dynamic_graph=True
+                    device,
+                    static_road_network,
+                    input_dim,
+                    num_nodes,
+                    input_len,
+                    output_len,
+                    llm_layer,
+                    U,
+                    use_dynamic_graph=True,
+                    daily_intervals=daily_intervals,
+                    initial_static_weight=initial_static_weight,
+                    final_static_weight=final_static_weight,
+                    pruning_keep_ratio=pruning_keep_ratio,
+                    dropout_rate=dropout_rate,
+                    lora_rank=lora_rank,
+                    lora_alpha=lora_alpha,
                 )
                 for _ in range(vmd_K)
             ]
@@ -358,7 +393,12 @@ class DGLLM(nn.Module):
 
         # --- 3. Global Residual Path ---
         # [LEARNABLE] Global Flow Scaling
-        self.global_flow_residual_scale = nn.Parameter(torch.tensor(self.DEFAULT_GLOBAL_FLOW_RESIDUAL_SCALE))
+        res_scale = (
+            global_flow_residual_scale
+            if global_flow_residual_scale is not None
+            else self.DEFAULT_GLOBAL_FLOW_RESIDUAL_SCALE
+        )
+        self.global_flow_residual_scale = nn.Parameter(torch.tensor(float(res_scale)))
         
         # Projection to match input history to output horizon
         self.flow_residual_projection = nn.Sequential(
@@ -411,20 +451,20 @@ class DGLLM(nn.Module):
         return final_prediction, learned_graphs
 
     def _blend_modes(self, mode_predictions):
-        """Fuses mode predictions using a cross-mode attention mechanism."""
+        """Fuses mode predictions using cross-mode attention per node."""
         stacked = torch.stack(mode_predictions, dim=0)  # [K, B, T, N, 1]
         K, B, T, N, _ = stacked.shape
         
-        # Prepare features for attention: [K, B*N, T]
-        feat = stacked.squeeze(-1).permute(0, 1, 3, 2).reshape(K, B * N, T)
-        
-        # Calculate cross-mode attention scores
+        # Prepare features for attention: [B, N, K, T]
+        feat = stacked.squeeze(-1).permute(1, 3, 0, 2)
         query = self.fusion_query(feat)
         key = self.fusion_key(feat)
-        scores = torch.matmul(query, key.transpose(1, 2)).mean(dim=-1) # [K, B*N]
         
-        # Apply weights and sum
-        weights = F.softmax(scores, dim=0).view(K, B, 1, N, 1)
+        # Scaled dot-product attention score per mode: [B, N, K]
+        scores = (query * key).sum(dim=-1) / math.sqrt(T)
+        
+        # Apply softmax across K modes and aggregate: [K, B, 1, N, 1]
+        weights = F.softmax(scores, dim=-1).permute(2, 0, 1).unsqueeze(2).unsqueeze(-1)
         return (stacked * weights).sum(dim=0)
 
     # UTIL

@@ -91,13 +91,7 @@ class SpatialAwareGPT2Attention(GPT2Attention):
         batch_size, num_heads, query_len, _ = query.size()
         key_len = key.size(-2)
 
-        # 1. Start with Causal Bias
-        attention_bias = self._get_cached_causal_bias(
-            query_len=query_len, key_len=key_len, device=hidden_states.device, dtype=query.dtype
-        )
-
-        # --------------------------------------------------------
-        # 2. Integrate Spatial/Graph Bias
+        # 1. Spatial / Graph Bias
         if attn_bias is not None:
             if attn_bias.dim() != 4 or attn_bias.size(2) != query_len or attn_bias.size(3) != key_len:
                 raise ValueError(f"attn_bias shape mismatch: expected [B|1, H|1, {query_len}, {key_len}], got {list(attn_bias.size())}")
@@ -107,10 +101,11 @@ class SpatialAwareGPT2Attention(GPT2Attention):
             if attn_bias.size(1) == 1 and num_heads > 1:
                 attn_bias = attn_bias.expand(-1, num_heads, -1, -1)
             
-            attention_bias = attention_bias + attn_bias.to(dtype=query.dtype)
-        # elif not hasattr(self, "_logged_causal_only"):
-        #     print(f"[SpatialAwareGPT2Attention] Causal-only mode (no spatial bias). T={query_len}")
-        #     self._logged_causal_only = True
+            # Since tokens are spatial nodes, use graph connectivity mask directly
+            attention_bias = attn_bias.to(dtype=query.dtype)
+        else:
+            # Unbiased bidirectional spatial attention for lower layers
+            attention_bias = None
 
         # 3. Scaled Dot Product Attention
         attn_output = F.scaled_dot_product_attention(
@@ -190,6 +185,8 @@ class SpatialGPTBackbone(nn.Module):
         U: int = 1,
         dropout_rate: float = 0.0,
         use_gradient_checkpointing: bool = True,
+        lora_rank: int = 16,
+        lora_alpha: int = 32,
     ):
         # Initializes the backbone by loading GPT2, injecting spatial layers, and applying LoRA.
         """
@@ -201,13 +198,16 @@ class SpatialGPTBackbone(nn.Module):
             U: Number of top layers receiving graph bias and remaining trainable.
             dropout_rate: Dropout probability.
             use_gradient_checkpointing: Enable memory-efficient gradients.
+            lora_rank: LoRA rank dimension.
+            lora_alpha: LoRA alpha scaling factor.
         """
         super().__init__()
         self.num_backbone_layers = gpt_layers
         self.unfrozen_top_layers = U
         self.dropout_rate = dropout_rate
         self.use_gradient_checkpointing = use_gradient_checkpointing
-        self.lora_rank = 16
+        self.lora_rank = lora_rank
+        self.lora_alpha = lora_alpha
 
         self.gpt2 = self._init_base_model()
         self._freeze_lower_layers()
@@ -229,7 +229,7 @@ class SpatialGPTBackbone(nn.Module):
 
         lora_config = LoraConfig(
             r=self.lora_rank,
-            lora_alpha=32,
+            lora_alpha=self.lora_alpha,
             lora_dropout=self.dropout_rate,
             target_modules=["c_attn"],
             bias="none",

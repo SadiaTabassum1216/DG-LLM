@@ -139,6 +139,12 @@ def load_raw_traffic_data(data_path: str) -> np.ndarray:
                     break
             else:
                 data = f[list(f.keys())[0]][:]
+    elif ext == '.csv':
+        import pandas as pd
+        df = pd.read_csv(data_path)
+        # Select numeric columns (ignoring timestamp/date strings if any)
+        numeric_cols = df.select_dtypes(include=[np.number]).columns
+        data = df[numeric_cols].values
     else:
         raise ValueError(f"Unsupported file format: {ext}")
     
@@ -222,6 +228,7 @@ def preprocess_dataset(
         'output_len': output_len,
         'num_nodes': data.shape[1],
         'num_features': data.shape[2],
+        'steps_per_day': steps_per_day,
         'train_samples': splits['train']['x'].shape[0],
         'val_samples': splits['val']['x'].shape[0],
         'test_samples': splits['test']['x'].shape[0],

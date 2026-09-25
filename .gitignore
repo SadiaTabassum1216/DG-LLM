@@ -11,3 +11,5 @@ results
 
 vmd_cache
 scratch
+
+dg_llm_pipeline_walkthrough.md
