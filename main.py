@@ -308,7 +308,7 @@ def main():
                 
                 pred, _ = trainer.model(tvmd, x_in)
                 preds_unscaled = data['scaler'].inverse_transform(pred)
-                reals_unscaled = data['scaler'].inverse_transform(ty)
+                reals_unscaled = ty
                 
                 all_preds.append(preds_unscaled)
                 all_reals.append(reals_unscaled)

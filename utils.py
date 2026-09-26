@@ -1,3 +1,4 @@
+import sys
 import torch
 import numpy as np
 import pickle
@@ -5,6 +6,15 @@ import math
 import os
 import random
 from torch.optim.optimizer import Optimizer
+
+# NumPy 2.x to 1.x pickle unpickling compatibility bridge
+if not hasattr(np, "_core") and hasattr(np, "core"):
+    sys.modules["numpy._core"] = np.core
+    if hasattr(np.core, "numeric"):
+        sys.modules["numpy._core.numeric"] = np.core.numeric
+    if hasattr(np.core, "multiarray"):
+        sys.modules["numpy._core.multiarray"] = np.core.multiarray
+
 
 
 def seed_everything(seed: int = 42) -> None:
@@ -19,14 +29,23 @@ def seed_everything(seed: int = 42) -> None:
     torch.backends.cudnn.benchmark = False
 
 
+class _CompatUnpickler(pickle.Unpickler):
+    def find_class(self, module, name):
+        if module.startswith("numpy._core"):
+            module = module.replace("numpy._core", "numpy.core")
+        elif module.startswith("numpy.core") and hasattr(np, "_core"):
+            module = module.replace("numpy.core", "numpy._core")
+        return super().find_class(module, name)
+
+
 def load_pickle(pickle_file):
-    """Load a pickle file with fallback for different encodings."""
+    """Load a pickle file with fallback for different encodings and numpy versions."""
     try:
         with open(pickle_file, 'rb') as f:
-            pickle_data = pickle.load(f)
-    except UnicodeDecodeError as e:
+            pickle_data = _CompatUnpickler(f).load()
+    except UnicodeDecodeError:
         with open(pickle_file, 'rb') as f:
-            pickle_data = pickle.load(f, encoding='latin1')
+            pickle_data = _CompatUnpickler(f, encoding='latin1').load()
     except Exception as e:
         print('Unable to load data ', pickle_file, ':', e)
         raise
