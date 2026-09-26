@@ -11,6 +11,7 @@ from model import DGLLM
 class Trainer:
     def __init__(self, args, scaler, adj_mx, device):
         self.args = args
+        self.scaler = scaler
         self.device = device
         daily_intervals = getattr(args, "steps_per_day", None) or getattr(args, "daily_intervals", 288)
         global_res_scale = getattr(args, "global_residual_scale", 0.40)

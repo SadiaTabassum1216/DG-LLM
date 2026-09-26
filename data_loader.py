@@ -101,15 +101,25 @@ def _validate_stored_sequence_lengths(sample_path, args):
 # Loads train, validation, and test arrays from available NPZ split files.
 def _load_data_splits(dataset_dir):
     data = {}
+    missing_splits = []
     for split in SPLITS:
         path = os.path.join(dataset_dir, f"{split}.npz")
         if not os.path.exists(path):
-            print(f"  [Warning] {path} not found. Skipping...")
+            missing_splits.append(path)
             continue
 
         split_data = np.load(path)
         data[f"x_{split}"] = split_data["x"]
         data[f"y_{split}"] = split_data["y"]
+
+    if missing_splits:
+        raise FileNotFoundError(
+            f"\n[DATASET NOT FOUND] Missing processed dataset files in: {dataset_dir}\n"
+            f"Missing file(s):\n" + "\n".join(f"  - {p}" for p in missing_splits) + "\n\n"
+            f"Please run `preprocess_data.py` to generate the processed train/val/test splits.\n"
+            f"Example:\n"
+            f"  python preprocess_data.py --raw_path Dataset/dhaka/traffic_mci_2026.csv --output_dir Dataset/dhaka/processed --steps_per_day 144"
+        )
     return data
 
 
